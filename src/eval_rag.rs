@@ -196,9 +196,9 @@ pub fn evaluate(qas: &[RagQa]) -> RagEvalReport {
 fn tokenise(s: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut current = String::new();
-    for c in s.chars() {
+    for c in s.to_lowercase().chars() {
         if c.is_alphanumeric() {
-            current.push(c.to_ascii_lowercase());
+            current.push(c);
         } else if !current.is_empty() {
             out.push(std::mem::take(&mut current));
         }

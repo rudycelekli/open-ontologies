@@ -46,6 +46,11 @@ All notable changes to Open Ontologies are documented here.
 
 ### Fixed
 
+- Lowercase Unicode text in RAG answer scoring before the existing token split,
+  so non-ASCII case differences do not reduce faithfulness, Jaccard, or ROUGE-1
+  scores. Retrieval metrics and token-boundary rules retain their behavior.
+
+
 - **The embedding model is loaded once per process rather than once per HTTP
   session** (#262). The HTTP arm hands the same server constructor to
   `StreamableHttpService::new` as a per-session factory, so everything that
