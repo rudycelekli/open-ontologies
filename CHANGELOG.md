@@ -4,6 +4,12 @@ All notable changes to Open Ontologies are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Scope deterministic synthetic row identifiers to the original source stem,
+  preserving distinct subjects across sheets and class overrides. Encode source
+  names losslessly; identical stems require distinct base IRIs.
+
 ### Added
 
 - **A named profile hands a client one job's worth of the tool surface** (#263).
@@ -45,6 +51,11 @@ All notable changes to Open Ontologies are documented here.
   report says so, so it never means false.
 
 ### Fixed
+
+- Materialize documented row-number identifiers in batch and MCP induction
+  when no input column identifies the rows. Choose an unused internal field so
+  existing `__row` data remains a property instead of merging different rows.
+
 
 - **The embedding model is loaded once per process rather than once per HTTP
   session** (#262). The HTTP arm hands the same server constructor to
