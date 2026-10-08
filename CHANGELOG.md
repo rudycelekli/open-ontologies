@@ -4,6 +4,10 @@ All notable changes to Open Ontologies are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep original Turtle error line numbers when applying a local document base.
+
 ### Added
 
 - **A named profile hands a client one job's worth of the tool surface** (#263).
@@ -45,6 +49,11 @@ All notable changes to Open Ontologies are documented here.
   report says so, so it never means false.
 
 ### Fixed
+
+- Validate relative RDF references against the local document base, matching
+  loading, conversion, and linting. Encode local file URLs so RDF files under paths with
+  spaces, percent signs, or fragment characters resolve relative references
+  correctly; explicit Turtle and XML bases retain priority.
 
 - **The embedding model is loaded once per process rather than once per HTTP
   session** (#262). The HTTP arm hands the same server constructor to
