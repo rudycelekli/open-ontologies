@@ -1,0 +1,96 @@
+name: Mapping percent candidate validation
+on:
+  push:
+    branches: [validation/mapping-percent-20261010]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      APP_SHA: 04dc6d643691077fd98bf4b88fcfaaa48ec74f8b
+      BASE_SHA: ce9415e9651117b7335d3b32d73d38b4eb1e3219
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 04dc6d643691077fd98bf4b88fcfaaa48ec74f8b
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify source and validation tree identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$APP_SHA"
+          test "$(git rev-parse '${{ github.sha }}^')" = "$APP_SHA"
+          test "$(git diff --name-only "$APP_SHA" '${{ github.sha }}')" = '.github/workflows/mapping-percent-validation.yml'
+          git diff "$APP_SHA" '${{ github.sha }}' -- . ':!.github/workflows/mapping-percent-validation.yml' > validation-tree.diff
+          test ! -s validation-tree.diff
+          sha256sum src/mapping.rs tests/mapping_percent_iri_test.rs Cargo.lock > application.sha256
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Original mapping must fail the real integration regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'git show "$APP_SHA:src/mapping.rs" > src/mapping.rs' EXIT
+          git show "$BASE_SHA:src/mapping.rs" > src/mapping.rs
+          set +e
+          cargo test --locked --test mapping_percent_iri_test -- --nocapture > baseline.log 2>&1
+          code=$?
+          set -e
+          cat baseline.log
+          test "$code" = 101
+          grep -Fq 'percent_components_parse_in_subjects_predicates_and_lookup_objects ... FAILED' baseline.log
+          grep -Fq 'test result: FAILED. 0 passed; 1 failed;' baseline.log
+          grep -Fq '<https://example.org/50%>' baseline.log
+          if grep -Eq 'error\[E[0-9]+\]|could not compile' baseline.log; then exit 1; fi
+      - name: Restore exact application source
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show "$APP_SHA:src/mapping.rs" > src/mapping.rs
+          sha256sum --check application.sha256
+          git diff --exit-code
+      - name: Fixed integration regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --test mapping_percent_iri_test -- --nocapture 2>&1 | tee fixed.log
+      - name: Required build and full tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked 2>&1 | tee build.log
+          cargo test --locked -- --nocapture 2>&1 | tee full-tests.log
+      - name: Required Clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --locked -- -D warnings 2>&1 | tee clippy.log
+      - name: Required dependency audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --locked
+          cargo audit 2>&1 | tee audit.log
+      - name: Final source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum --check application.sha256
+          git diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mapping-percent-validation
+          retention-days: 3
+          path: |
+            *.log
+            application.sha256
+            validation-tree.diff
