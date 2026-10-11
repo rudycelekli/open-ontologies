@@ -1,0 +1,75 @@
+name: KGCL datatype baseline probe
+'on':
+  push:
+    branches:
+    - validation/kgcl-datatype-probe-20261010
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BASE_SHA: ce9415e9651117b7335d3b32d73d38b4eb1e3219
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ce9415e9651117b7335d3b32d73d38b4eb1e3219
+        fetch-depth: 0
+        persist-credentials: false
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Actual public consumer and unchanged controls
+      shell: bash
+      run: "set -euo pipefail\nexport EVIDENCE_DIR=\"$RUNNER_TEMP/kgcl-datatype-probe\"\
+        \nmkdir -p \"$EVIDENCE_DIR\"\necho \"EVIDENCE_DIR=$EVIDENCE_DIR\" >> \"$GITHUB_ENV\"\
+        \ntest \"$(git rev-parse HEAD)\" = \"$BASE_SHA\"\ntest \"$(git rev-parse '${{\
+        \ github.sha }}^')\" = \"$BASE_SHA\"\ntest \"$(git diff --name-only \"$BASE_SHA\"\
+        \ '${{ github.sha }}')\" = '.github/workflows/kgcl-datatype-probe.yml'\nsha256sum\
+        \ python/src/open_ontologies_lite/kgcl.py python/pyproject.toml > \"$EVIDENCE_DIR/source.sha256\"\
+        \npython -m pip install --only-binary=pyoxigraph -e 'python[dev]'\npython\
+        \ --version\npython -m pip freeze > \"$EVIDENCE_DIR/versions.log\"\ncat >\
+        \ \"$EVIDENCE_DIR/test_kgcl_literal_datatype.py\" <<'PROBE'\n\"\"\"Public\
+        \ consumer regression for RDF literal datatype identity.\"\"\"\nimport pytest\n\
+        from open_ontologies_lite import kgcl_diff\n\nPREFIX = '@prefix ex: <http://example.org/>\
+        \ . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> . '\n\n@pytest.mark.parametrize(\"\
+        old_object,new_object\", [\n    ('\"7\"', '\"7\"^^xsd:integer'),\n    ('\"\
+        7\"^^xsd:integer', '\"7\"^^xsd:decimal'),\n    ('\"7\"^^xsd:integer', '\"\
+        7\"^^xsd:double'),\n], ids=[\"string-to-integer\", \"integer-to-decimal\"\
+        , \"integer-to-double\"])\ndef test_kgcl_diff_detects_literal_datatype_change(old_object,\
+        \ new_object):\n    old = PREFIX + f'ex:Thing ex:value {old_object} .'\n \
+        \   new = PREFIX + f'ex:Thing ex:value {new_object} .'\n    result = kgcl_diff(old,\
+        \ new)\n    assert result.counts() == {\"edge_creation\": 1, \"edge_deletion\"\
+        : 1}\n    assert {change[\"subject\"] for change in result.changes} == {\"\
+        http://example.org/Thing\"}\n    assert len({change[\"object\"] for change\
+        \ in result.changes}) == 2\n    assert kgcl_diff(old, old).changes == []\n\
+        \    assert kgcl_diff(new, new).changes == []\n\n@pytest.mark.parametrize(\"\
+        object_text\", ['\"7\"', '\"7\"^^xsd:integer', '\"7\"^^xsd:decimal', '\"7\"\
+        ^^xsd:double', '\"seven\"@en'], ids=[\"string\", \"integer\", \"decimal\"\
+        , \"double\", \"language\"])\ndef test_kgcl_unchanged_literal_is_empty(object_text):\n\
+        \    document = PREFIX + f'ex:Thing ex:value {object_text} .'\n    assert\
+        \ kgcl_diff(document, document).changes == []\nPROBE\nset +e\npython -m pytest\
+        \ -v \"$EVIDENCE_DIR/test_kgcl_literal_datatype.py\" --junitxml=\"$EVIDENCE_DIR/probe.xml\"\
+        \ > \"$EVIDENCE_DIR/probe.log\" 2>&1\ncode=$?\nset -e\ncat \"$EVIDENCE_DIR/probe.log\"\
+        \ntest \"$code\" = 0 -o \"$code\" = 1\npython - <<'PYCODE'\nimport pathlib,\
+        \ os, json, xml.etree.ElementTree as ET\np = pathlib.Path(os.environ['EVIDENCE_DIR'])\n\
+        cases = list(ET.parse(p / 'probe.xml').iter('testcase'))\nassert len(cases)\
+        \ == 8, len(cases)\nresults = []\nfor case in cases:\n    assert case.find('error')\
+        \ is None and case.find('skipped') is None, case.attrib\n    failures = case.findall('failure')\n\
+        \    assert len(failures) <= 1\n    if failures: assert 'AssertionError' in\
+        \ (failures[0].text or ''), failures[0].text\n    results.append({'name':\
+        \ case.attrib['name'], 'failed': bool(failures), 'failure': failures[0].text\
+        \ if failures else None})\ncontrols = [r for r in results if r['name'].startswith('test_kgcl_unchanged_literal_is_empty')]\n\
+        assert len(controls) == 5 and not any(r['failed'] for r in controls), controls\n\
+        (p / 'result.json').write_text(json.dumps({'scope': 'Actual public kgcl_diff\
+        \ baseline probe', 'cases': results, 'passed': sum(not r['failed'] for r in\
+        \ results), 'failed': sum(r['failed'] for r in results), 'errors': 0, 'skips':\
+        \ 0}, indent=2)+'\\n')\nPYCODE\nsha256sum --check \"$EVIDENCE_DIR/source.sha256\"\
+        \ngit diff --exit-code\n"
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: kgcl-datatype-probe
+        retention-days: 3
+        path: ${{ runner.temp }}/kgcl-datatype-probe/
