@@ -1,0 +1,146 @@
+name: Dataframe CR candidate validation
+on:
+  push:
+    branches: [validation/dataframe-cr-20261010]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      APP_SHA: 00042ff6210facd9f57368ab4a2da043c95ddef9
+      BASE_SHA: ce9415e9651117b7335d3b32d73d38b4eb1e3219
+      EVIDENCE_DIR: ${{ runner.temp }}/dataframe-cr-evidence
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 00042ff6210facd9f57368ab4a2da043c95ddef9
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify source and validation tree identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          test "$(git rev-parse HEAD)" = "$APP_SHA"
+          test "$(git rev-parse '${{ github.sha }}^')" = "$APP_SHA"
+          test "$(git diff --name-only "$APP_SHA" '${{ github.sha }}')" = '.github/workflows/dataframe-cr-validation.yml'
+          git diff "$APP_SHA" '${{ github.sha }}' -- . ':!.github/workflows/dataframe-cr-validation.yml' > "$EVIDENCE_DIR/validation-tree.diff"
+          test ! -s "$EVIDENCE_DIR/validation-tree.diff"
+          sha256sum python/src/open_ontologies_lite/dataframe.py python/tests/test_dataframe.py Cargo.lock > "$EVIDENCE_DIR/application.sha256"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install actual Python package and dev tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --only-binary=pyoxigraph -e 'python[dev]' build
+          python --version
+          python -m pip freeze > "$EVIDENCE_DIR/python-versions.log"
+      - name: Original dataframe must fail actual engine roundtrip
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'git show "$APP_SHA:python/src/open_ontologies_lite/dataframe.py" > python/src/open_ontologies_lite/dataframe.py' EXIT
+          git show "$BASE_SHA:python/src/open_ontologies_lite/dataframe.py" > python/src/open_ontologies_lite/dataframe.py
+          set +e
+          python -m pytest -v python/tests/test_dataframe.py -k test_engine_load_rows_preserves_string_line_endings --junitxml="$EVIDENCE_DIR/baseline.xml" > "$EVIDENCE_DIR/baseline.log" 2>&1
+          code=$?
+          set -e
+          cat "$EVIDENCE_DIR/baseline.log"
+          test "$code" = 1
+          python - <<'PYCODE'
+          import json, os, pathlib, xml.etree.ElementTree as ET
+          evidence = pathlib.Path(os.environ['EVIDENCE_DIR'])
+          tree = ET.parse(evidence / 'baseline.xml')
+          cases = list(tree.iter('testcase'))
+          prefix = 'test_engine_load_rows_preserves_string_line_endings'
+          failures = {'carriage-return', 'crlf'}
+          controls = {'quote-and-backslash', 'newline', 'tab', 'ordinary'}
+          expected = {f'{prefix}[{name}]' for name in failures | controls}
+          assert len(cases) == 6, len(cases)
+          assert {case.attrib['name'] for case in cases} == expected
+          for case in cases:
+              name = case.attrib['name']
+              assert case.attrib['classname'].split('.')[-1] == 'test_dataframe', case.attrib
+              assert case.find('error') is None and case.find('skipped') is None, name
+              found = case.findall('failure')
+              should_fail = name in {f'{prefix}[{kind}]' for kind in failures}
+              assert len(found) == int(should_fail), (name, found)
+              if should_fail:
+                  assert 'SyntaxError:' in (found[0].text or ''), found[0].text
+                  assert 'SyntaxError' in found[0].attrib.get('message', ''), found[0].attrib
+          (evidence / 'baseline-classifier.json').write_text(json.dumps({
+              'cases': sorted(expected), 'failed': sorted(failures),
+              'passed': sorted(controls), 'errors': 0, 'skips': 0,
+              'failure_type': 'SyntaxError', 'verdict': 'expected baseline reproduced'
+          }, indent=2) + '\n')
+          PYCODE
+      - name: Restore exact application source
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show "$APP_SHA:python/src/open_ontologies_lite/dataframe.py" > python/src/open_ontologies_lite/dataframe.py
+          sha256sum --check "$EVIDENCE_DIR/application.sha256"
+          git diff --exit-code
+      - name: Fixed dataframe and entire Python core suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest -v -rs python/tests/test_dataframe.py 2>&1 | tee "$EVIDENCE_DIR/fixed.log"
+          python -m pytest -v -rs python/tests --ignore=python/tests/test_align.py --ignore=python/tests/test_shacl.py --ignore=python/tests/test_shacl_vacuous.py 2>&1 | tee "$EVIDENCE_DIR/python-core.log"
+      - name: Build and consume package wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m build --wheel --outdir "$EVIDENCE_DIR/dist" python 2>&1 | tee "$EVIDENCE_DIR/wheel-build.log"
+          python -m pip install --force-reinstall --no-deps "$EVIDENCE_DIR"/dist/*.whl
+          python -I - <<'PYCODE' 2>&1 | tee "$EVIDENCE_DIR/wheel-smoke.log"
+          import open_ontologies_lite
+          from open_ontologies_lite import OntologyEngine
+          assert '/site-packages/' in open_ontologies_lite.__file__, open_ontologies_lite.__file__
+          for value in ('left\rright', 'left\r\nright'):
+              engine = OntologyEngine()
+              assert engine.load_rows([{'note': value}], base_iri='http://x.org/') == 1
+              rows = engine.query('SELECT ?note WHERE { ?s <http://x.org/note> ?note }')['rows']
+              assert rows == [{'note': value}], rows
+          print('Installed wheel CR/CRLF engine roundtrip passed')
+          PYCODE
+      - name: Required build and full tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked 2>&1 | tee "$EVIDENCE_DIR/build.log"
+          cargo test --locked -- --nocapture 2>&1 | tee "$EVIDENCE_DIR/full-tests.log"
+      - name: Required Clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --locked -- -D warnings 2>&1 | tee "$EVIDENCE_DIR/clippy.log"
+      - name: Required dependency audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit 2>&1 | tee "$EVIDENCE_DIR/audit.log"
+      - name: Final source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum --check "$EVIDENCE_DIR/application.sha256"
+          git diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dataframe-cr-validation
+          retention-days: 3
+          path: ${{ runner.temp }}/dataframe-cr-evidence/
