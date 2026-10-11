@@ -8,6 +8,7 @@ jobs:
     env:
       APP_SHA: baba4f076d8a9f7dc8c2544d5ae94cd977c9baad
       BASE_SHA: ce9415e9651117b7335d3b32d73d38b4eb1e3219
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
     - uses: actions/checkout@v4
       with:
@@ -72,7 +73,9 @@ jobs:
         '
     - name: Original native insertion regressions and controls
       shell: bash
-      run: "set -euo pipefail\ntrap 'git show \"$APP_SHA:python/src/open_ontologies_lite/align.py\"\
+      run: "set -euo pipefail\npython - <<'CACHE'\nimport pathlib, shutil\nfor cache\
+        \ in pathlib.Path('python/src/open_ontologies_lite').rglob('__pycache__'):\n\
+        \    shutil.rmtree(cache)\nCACHE\ntrap 'git show \"$APP_SHA:python/src/open_ontologies_lite/align.py\"\
         \ > python/src/open_ontologies_lite/align.py' EXIT\ngit show \"$BASE_SHA:python/src/open_ontologies_lite/align.py\"\
         \ > python/src/open_ontologies_lite/align.py\nset +e\npython -m pytest -v\
         \ python/tests/test_align_failed_insertion.py -k \"not test_first_rejected_insertion_keeps_empty_index_and_build_state\"\
@@ -90,18 +93,41 @@ jobs:
     - name: Restore exact application source
       if: always()
       shell: bash
-      run: 'set -euo pipefail
-
-        git show "$APP_SHA:python/src/open_ontologies_lite/align.py" > python/src/open_ontologies_lite/align.py
-
-        sha256sum --check "$EVIDENCE_DIR/application.sha256"
-
-        git diff --exit-code
-
-        '
+      run: "set -euo pipefail\ngit show \"$APP_SHA:python/src/open_ontologies_lite/align.py\"\
+        \ > python/src/open_ontologies_lite/align.py\nsha256sum --check \"$EVIDENCE_DIR/application.sha256\"\
+        \ngit diff --exit-code\n\npython - <<'CACHE'\nimport pathlib, shutil\nfor\
+        \ cache in pathlib.Path('python/src/open_ontologies_lite').rglob('__pycache__'):\n\
+        \    shutil.rmtree(cache)\nCACHE\n"
     - name: Fixed native alignment and entire Python suite
       shell: bash
       run: 'set -euo pipefail
+
+        python - <<''IDENTITY''
+
+        import hashlib, json, marshal, os, pathlib, types
+
+        import open_ontologies_lite.align as module
+
+        source = pathlib.Path(module.__file__)
+
+        compiled = compile(source.read_text(), str(source), ''exec'')
+
+        cls = next(c for c in compiled.co_consts if isinstance(c, types.CodeType)
+        and c.co_name == ''AlignmentIndex'')
+
+        method = next(c for c in cls.co_consts if isinstance(c, types.CodeType) and
+        c.co_name == ''add'')
+
+        loaded = module.AlignmentIndex.add.__code__
+
+        assert marshal.dumps(loaded) == marshal.dumps(method), ''Loaded method differs
+        from exact APP source compilation''
+
+        pathlib.Path(os.environ[''EVIDENCE_DIR''], ''loaded-source-identity.json'').write_text(json.dumps({''module'':
+        str(source), ''sha256'': hashlib.sha256(source.read_bytes()).hexdigest(),
+        ''loaded_method_matches_compiled_source'': True}, indent=2)+''\n'')
+
+        IDENTITY
 
         python -m pytest -v -rs python/tests/test_align.py python/tests/test_align_failed_insertion.py
         2>&1 | tee "$EVIDENCE_DIR/fixed.log"
@@ -115,7 +141,13 @@ jobs:
         \ python 2>&1 | tee \"$EVIDENCE_DIR/wheel-build.log\"\npython -m pip install\
         \ --force-reinstall --no-deps \"$EVIDENCE_DIR\"/dist/*.whl\npython -I - <<'PYCODE'\
         \ 2>&1 | tee \"$EVIDENCE_DIR/wheel-smoke.log\"\nimport open_ontologies_lite\n\
-        from open_ontologies_lite.align import AlignmentIndex\nassert '/site-packages/'\
+        import hashlib, json, os, pathlib, zipfile\nimport open_ontologies_lite.align\
+        \ as module\nwheel = next(pathlib.Path(os.environ['EVIDENCE_DIR'], 'dist').glob('*.whl'))\n\
+        path = pathlib.Path(module.__file__)\nassert '/site-packages/' in str(path)\n\
+        with zipfile.ZipFile(wheel) as archive:\n    expected = archive.read('open_ontologies_lite/align.py')\n\
+        assert path.read_bytes() == expected\npathlib.Path(os.environ['EVIDENCE_DIR'],\
+        \ 'wheel-module-identity.json').write_text(json.dumps({'module':str(path),'wheel':wheel.name,'sha256':hashlib.sha256(expected).hexdigest(),'matches_wheel':True},indent=2)+'\\\
+        n')\nfrom open_ontologies_lite.align import AlignmentIndex\nassert '/site-packages/'\
         \ in open_ontologies_lite.__file__\nfor failure in ['capacity','numeric']:\n\
         \    index=AlignmentIndex(2,max_elements=1 if failure=='capacity' else 3)\n\
         \    index.add('first',[1.,0.])\n    try: index.add('rejected',[0.,1.] if\
@@ -148,4 +180,4 @@ jobs:
 'on':
   push:
     branches:
-    - validation/alignment-insertion-20261010
+    - validation/alignment-insertion-v2-20261010
