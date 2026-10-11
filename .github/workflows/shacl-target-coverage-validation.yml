@@ -1,0 +1,180 @@
+name: SHACL target coverage candidate validation
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      APP_SHA: caf09a6607dee42a93baf6c9c96cb51f75ca8219
+      BASE_SHA: ce9415e9651117b7335d3b32d73d38b4eb1e3219
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: caf09a6607dee42a93baf6c9c96cb51f75ca8219
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Verify source and validation tree identity
+      shell: bash
+      run: 'set -euo pipefail
+
+        export EVIDENCE_DIR="$RUNNER_TEMP/shacl-target-coverage-evidence"
+
+        echo "EVIDENCE_DIR=$EVIDENCE_DIR" >> "$GITHUB_ENV"
+
+        mkdir -p "$EVIDENCE_DIR"
+
+        test "$(git rev-parse HEAD)" = "$APP_SHA"
+
+        test "$(git rev-parse ''${{ github.sha }}^'')" = "$APP_SHA"
+
+        test "$(git diff --name-only "$APP_SHA" ''${{ github.sha }}'')" = ''.github/workflows/shacl-target-coverage-validation.yml''
+
+        git diff "$APP_SHA" ''${{ github.sha }}'' -- . '':!.github/workflows/shacl-target-coverage-validation.yml''
+        > "$EVIDENCE_DIR/validation-tree.diff"
+
+        test ! -s "$EVIDENCE_DIR/validation-tree.diff"
+
+        sha256sum python/src/open_ontologies_lite/shacl.py python/tests/test_shacl_targeted_shapes.py
+        Cargo.lock > "$EVIDENCE_DIR/application.sha256"
+
+        '
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Verify exact native-input equivalence to completed lane
+      shell: bash
+      run: "set -euo pipefail\npython - <<'PYCODE'\nimport subprocess, pathlib, os,\
+        \ hashlib, json\nprior = '00042ff6210facd9f57368ab4a2da043c95ddef9'\napp =\
+        \ os.environ['APP_SHA']\ndef inputs(ref):\n    records = subprocess.check_output(['git',\
+        \ 'ls-tree', '-rz', ref]).split(b'\\0')\n    return [record for record in\
+        \ records if record and not record.split(b'\\t',1)[1].startswith(b'python/')\
+        \ and record.split(b'\\t',1)[1] != b'CHANGELOG.md']\na, b = inputs(prior),\
+        \ inputs(app)\nassert a == b, 'Non-Python tree differs from prior completed\
+        \ native validation'\np = pathlib.Path(os.environ['EVIDENCE_DIR'])\n(p / 'native-input-identity.json').write_text(json.dumps({'application':\
+        \ app, 'prior_validated_application': prior, 'prior_run': 'https://github.com/rudycelekli/open-ontologies/actions/runs/38097956427',\
+        \ 'non_python_records': len(a), 'manifest_sha256': hashlib.sha256(b'\\0'.join(a)).hexdigest(),\
+        \ 'equal': True, 'claim': 'Reuse prior native gate evidence for identical\
+        \ non-Python inputs; no native Rust job ran on this application commit.'},\
+        \ indent=2)+'\\n')\nPYCODE\n"
+    - name: Install actual Python package and dev tools
+      shell: bash
+      run: 'set -euo pipefail
+
+        python -m pip install --only-binary=pyoxigraph -e ''python[dev,shacl]'' pyshacl==0.40.1
+        rdflib==7.6.0 pyoxigraph==0.5.11 pytest==9.1.1 build==1.6.1
+
+        python --version
+
+        python -m pip freeze > "$EVIDENCE_DIR/python-versions.log"
+
+        '
+    - name: Original target/inference regressions and controls
+      shell: bash
+      run: "set -euo pipefail\ntrap 'git show \"$APP_SHA:python/src/open_ontologies_lite/shacl.py\"\
+        \ > python/src/open_ontologies_lite/shacl.py' EXIT\ngit show \"$BASE_SHA:python/src/open_ontologies_lite/shacl.py\"\
+        \ > python/src/open_ontologies_lite/shacl.py\nset +e\npython -m pytest -v\
+        \ python/tests/test_shacl_targeted_shapes.py -k \"not test_advanced_rules_use_owned_validation_graph\"\
+        \ --junitxml=\"$EVIDENCE_DIR/baseline.xml\" > \"$EVIDENCE_DIR/baseline.log\"\
+        \ 2>&1\ncode=$?\nset -e\ncat \"$EVIDENCE_DIR/baseline.log\"\ntest \"$code\"\
+        \ = 1\npython - <<'PYCODE'\nimport json, os, pathlib, xml.etree.ElementTree\
+        \ as ET\np = pathlib.Path(os.environ['EVIDENCE_DIR'])\ncases = list(ET.parse(p/'baseline.xml').iter('testcase'))\n\
+        failed = set(['test_coverage_uses_the_graph_that_received_inference[both]',\
+        \ 'test_coverage_uses_the_graph_that_received_inference[owlrl]', 'test_coverage_uses_the_graph_that_received_inference[rdfs]',\
+        \ 'test_graph_targets_report_checked_nodes[empty-class-explicit-property]',\
+        \ 'test_graph_targets_report_checked_nodes[empty-class-implicit-node]', 'test_graph_targets_report_checked_nodes[empty-class-implicit-property]',\
+        \ 'test_graph_targets_report_checked_nodes[empty-objects-explicit-property]',\
+        \ 'test_graph_targets_report_checked_nodes[empty-objects-implicit-node]',\
+        \ 'test_graph_targets_report_checked_nodes[empty-objects-implicit-property]',\
+        \ 'test_graph_targets_report_checked_nodes[empty-subjects-explicit-property]',\
+        \ 'test_graph_targets_report_checked_nodes[empty-subjects-implicit-node]',\
+        \ 'test_graph_targets_report_checked_nodes[empty-subjects-implicit-property]',\
+        \ 'test_graph_targets_report_checked_nodes[matched-class-explicit-property]',\
+        \ 'test_graph_targets_report_checked_nodes[matched-class-implicit-node]',\
+        \ 'test_graph_targets_report_checked_nodes[matched-class-implicit-property]',\
+        \ 'test_graph_targets_report_checked_nodes[matched-objects-explicit-property]',\
+        \ 'test_graph_targets_report_checked_nodes[matched-objects-implicit-node]',\
+        \ 'test_graph_targets_report_checked_nodes[matched-objects-implicit-property]',\
+        \ 'test_graph_targets_report_checked_nodes[matched-subjects-explicit-property]',\
+        \ 'test_graph_targets_report_checked_nodes[matched-subjects-implicit-node]',\
+        \ 'test_graph_targets_report_checked_nodes[matched-subjects-implicit-property]',\
+        \ 'test_node_target_counts_even_without_data_node[explicit-property]', 'test_node_target_counts_even_without_data_node[implicit-node]',\
+        \ 'test_node_target_counts_even_without_data_node[implicit-property]'])\n\
+        controls = set(['test_disabled_inference_keeps_unmatched_target', 'test_explicit_membership_with_inference_retains_coverage',\
+        \ 'test_graph_targets_report_checked_nodes[empty-class-explicit-node]', 'test_graph_targets_report_checked_nodes[empty-objects-explicit-node]',\
+        \ 'test_graph_targets_report_checked_nodes[empty-subjects-explicit-node]',\
+        \ 'test_graph_targets_report_checked_nodes[matched-class-explicit-node]',\
+        \ 'test_graph_targets_report_checked_nodes[matched-objects-explicit-node]',\
+        \ 'test_graph_targets_report_checked_nodes[matched-subjects-explicit-node]',\
+        \ 'test_multiple_declarative_targets_count_each_shape_node_once', 'test_node_target_counts_even_without_data_node[explicit-node]',\
+        \ 'test_sparql_only_target_keeps_unknown_coverage_policy', 'test_untargeted_shape_does_not_become_unmatched'])\n\
+        assert len(cases)==36 and {c.attrib[\"name\"] for c in cases} == failed |\
+        \ controls\nfor c in cases:\n    assert c.find('error') is None and c.find('skipped')\
+        \ is None\n    f=c.findall('failure'); assert len(f)==int(c.attrib['name']\
+        \ in failed)\n    if f: assert 'AssertionError' in (f[0].text or '')\n(p/'baseline-classifier.json').write_text(json.dumps({'failed':sorted(failed),'controls':sorted(controls),'errors':0,'skips':0,'failure':'AssertionError'},indent=2)+'\\\
+        n')\nPYCODE\n"
+    - name: Restore exact application source
+      if: always()
+      shell: bash
+      run: 'set -euo pipefail
+
+        git show "$APP_SHA:python/src/open_ontologies_lite/shacl.py" > python/src/open_ontologies_lite/shacl.py
+
+        sha256sum --check "$EVIDENCE_DIR/application.sha256"
+
+        git diff --exit-code
+
+        '
+    - name: Fixed coverage and entire relevant Python suite
+      shell: bash
+      run: 'set -euo pipefail
+
+        python -m pytest -v -rs python/tests/test_shacl.py python/tests/test_shacl_vacuous.py
+        python/tests/test_shacl_targeted_shapes.py 2>&1 | tee "$EVIDENCE_DIR/fixed.log"
+
+        python -m pytest -v -rs python/tests --ignore=python/tests/test_align.py 2>&1
+        | tee "$EVIDENCE_DIR/python-core.log"
+
+        '
+    - name: Build and consume package wheel
+      shell: bash
+      run: "set -euo pipefail\npython -m build --wheel --outdir \"$EVIDENCE_DIR/dist\"\
+        \ python 2>&1 | tee \"$EVIDENCE_DIR/wheel-build.log\"\npython -m pip install\
+        \ --force-reinstall --no-deps \"$EVIDENCE_DIR\"/dist/*.whl\npython -I - <<'PYCODE'\
+        \ 2>&1 | tee \"$EVIDENCE_DIR/wheel-smoke.log\"\nimport open_ontologies_lite\n\
+        from open_ontologies_lite import OntologyEngine\nfrom open_ontologies_lite.shacl\
+        \ import shacl_validate\nassert '/site-packages/' in open_ontologies_lite.__file__\n\
+        p='@prefix ex:<http://x/>. @prefix sh:<http://www.w3.org/ns/shacl#>. @prefix\
+        \ rdfs:<http://www.w3.org/2000/01/rdf-schema#>. '\nfor typing in ['', 'a sh:PropertyShape;\
+        \ ']:\n    shape=p+'ex:S '+typing+'sh:targetClass ex:Person; sh:path ex:required;\
+        \ sh:minCount 1.'\n    report=shacl_validate(p+'ex:n a ex:Person.',shape)\n\
+        \    assert report['conforms'] is False and report['focus_nodes']==1 and report['count']==1\n\
+        \    empty=shacl_validate('',shape)\n    assert empty['conforms'] is None\
+        \ and len(empty['unmatched_shapes'])==1\nengine=OntologyEngine(); engine.load(p+'ex:p\
+        \ rdfs:domain ex:Person. ex:n ex:p ex:o.')\nbefore=engine.dump('ntriples')\n\
+        shape=p+'ex:S a sh:NodeShape; sh:targetClass ex:Person; sh:property [sh:path\
+        \ ex:required; sh:minCount 1].'\nfor inference in ['rdfs','owlrl','both']:\n\
+        \    report=shacl_validate(engine.dump(),shape,inference=inference)\n    assert\
+        \ report['conforms'] is False and report['focus_nodes']==1 and report['count']==1\n\
+        \    assert engine.dump('ntriples')==before\nprint('Installed wheel targeted-shape\
+        \ and inferred-graph coverage controls passed; caller store unchanged')\n\
+        PYCODE\n"
+    - name: Final source identity
+      shell: bash
+      run: 'set -euo pipefail
+
+        sha256sum --check "$EVIDENCE_DIR/application.sha256"
+
+        git diff --exit-code
+
+        '
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: shacl-target-coverage-validation
+        retention-days: 3
+        path: ${{ runner.temp }}/shacl-target-coverage-evidence/
+'on':
+  push:
+    branches:
+    - validation/shacl-target-coverage-20261010
