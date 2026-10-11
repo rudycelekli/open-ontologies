@@ -1,0 +1,160 @@
+name: Identical RDF diff candidate validation
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      APP_SHA: a3f7403b4ea63faa308502e4cbf52cf86c6d37b2
+      BASE_SHA: ce9415e9651117b7335d3b32d73d38b4eb1e3219
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: a3f7403b4ea63faa308502e4cbf52cf86c6d37b2
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Verify source and validation tree identity
+      shell: bash
+      run: 'set -euo pipefail
+
+        export EVIDENCE_DIR="$RUNNER_TEMP/identical-rdf-diff-evidence"
+
+        echo "EVIDENCE_DIR=$EVIDENCE_DIR" >> "$GITHUB_ENV"
+
+        mkdir -p "$EVIDENCE_DIR"
+
+        test "$(git rev-parse HEAD)" = "$APP_SHA"
+
+        test "$(git rev-parse ''${{ github.sha }}^'')" = "$APP_SHA"
+
+        test "$(git diff --name-only "$APP_SHA" ''${{ github.sha }}'')" = ''.github/workflows/identical-rdf-diff-validation.yml''
+
+        git diff "$APP_SHA" ''${{ github.sha }}'' -- . '':!.github/workflows/identical-rdf-diff-validation.yml''
+        > "$EVIDENCE_DIR/validation-tree.diff"
+
+        test ! -s "$EVIDENCE_DIR/validation-tree.diff"
+
+        sha256sum python/src/open_ontologies_lite/engine.py python/src/open_ontologies_lite/kgcl.py
+        python/tests/test_identical_diff.py Cargo.lock > "$EVIDENCE_DIR/application.sha256"
+
+        '
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Verify exact native-input equivalence to completed lane
+      shell: bash
+      run: "set -euo pipefail\npython - <<'PYCODE'\nimport subprocess, pathlib, os,\
+        \ hashlib, json\nprior = '00042ff6210facd9f57368ab4a2da043c95ddef9'\napp =\
+        \ os.environ['APP_SHA']\ndef inputs(ref):\n    records = subprocess.check_output(['git',\
+        \ 'ls-tree', '-rz', ref]).split(b'\\0')\n    return [record for record in\
+        \ records if record and not record.split(b'\\t',1)[1].startswith(b'python/')\
+        \ and record.split(b'\\t',1)[1] != b'CHANGELOG.md']\na, b = inputs(prior),\
+        \ inputs(app)\nassert a == b, 'Non-Python tree differs from prior completed\
+        \ native validation'\np = pathlib.Path(os.environ['EVIDENCE_DIR'])\n(p / 'native-input-identity.json').write_text(json.dumps({'application':\
+        \ app, 'prior_validated_application': prior, 'prior_run': 'https://github.com/rudycelekli/open-ontologies/actions/runs/38097956427',\
+        \ 'non_python_records': len(a), 'manifest_sha256': hashlib.sha256(b'\\0'.join(a)).hexdigest(),\
+        \ 'equal': True, 'claim': 'Reuse prior native gate evidence for identical\
+        \ non-Python inputs; no native Rust job ran on this application commit.'},\
+        \ indent=2)+'\\n')\nPYCODE\n"
+    - name: Install actual Python package and dev tools
+      shell: bash
+      run: 'set -euo pipefail
+
+        python -m pip install --only-binary=pyoxigraph -e ''python[dev,shacl,align]''
+        hnswlib==0.8.0 numpy==2.5.4 pyshacl==0.40.1 rdflib==7.6.0 pyoxigraph==0.5.11
+        pytest==9.1.1 build==1.6.1
+
+        python --version
+
+        python -m pip freeze > "$EVIDENCE_DIR/python-versions.log"
+
+        '
+    - name: Original public diff regressions and controls
+      shell: bash
+      run: "set -euo pipefail\npython - <<'CACHE'\nimport pathlib, shutil\nfor cache\
+        \ in pathlib.Path('python/src/open_ontologies_lite').rglob('__pycache__'):\n\
+        \    shutil.rmtree(cache)\nCACHE\nfor module in engine kgcl; do git show \"\
+        $BASE_SHA:python/src/open_ontologies_lite/$module.py\" > \"python/src/open_ontologies_lite/$module.py\"\
+        ; done\nset +e\npython -m pytest -v python/tests/test_identical_diff.py --junitxml=\"\
+        $EVIDENCE_DIR/baseline.xml\" > \"$EVIDENCE_DIR/baseline.log\" 2>&1\ncode=$?\n\
+        set -e\ncat \"$EVIDENCE_DIR/baseline.log\"\ntest \"$code\" = 1\npython - <<'CLASSIFIER'\n\
+        import json, os, pathlib, xml.etree.ElementTree as ET\np=pathlib.Path(os.environ['EVIDENCE_DIR'])\n\
+        cases=list(ET.parse(p/'baseline.xml').iter('testcase'))\nfailed={'test_identical_document_has_no_changes[engine-@prefix\
+        \ ex:<http://x/>. ex:S ex:p (\"a\" \"b\").-5]', 'test_identical_document_has_no_changes[engine-@prefix\
+        \ ex:<http://x/>. ex:S ex:p [ex:q \"value\"].-2]', 'test_identical_document_has_no_changes[kgcl-@prefix\
+        \ ex:<http://x/>. ex:S ex:p [ex:q [ex:r \"value\"]].-3]', 'test_identical_document_has_no_changes[kgcl-@prefix\
+        \ ex:<http://x/>. ex:S ex:p [ex:q \"value\"].-2]', 'test_identical_document_has_no_changes[kgcl-@prefix\
+        \ ex:<http://x/>. ex:S ex:p (\"a\" \"b\").-5]', 'test_identical_document_has_no_changes[engine-@prefix\
+        \ ex:<http://x/>. ex:S ex:p [ex:q [ex:r \"value\"]].-3]'}\ncontrols={'test_identical_invalid_document_still_rejected[kgcl_diff]',\
+        \ 'test_identical_document_has_no_changes[kgcl-@prefix ex:<http://x/>. ex:S\
+        \ ex:p _:b. _:b ex:q \"value\".-2]', 'test_identical_invalid_document_still_rejected[diff]',\
+        \ 'test_identical_document_has_no_changes[engine-@prefix ex:<http://x/>. ex:S\
+        \ ex:p _:b. _:b ex:q \"value\".-2]', 'test_identical_document_has_no_changes[kgcl-@prefix\
+        \ ex:<http://x/>. ex:S ex:p \"value\". ex:S ex:p \"value\".-1]', 'test_genuine_named_node_difference_control',\
+        \ 'test_identical_document_has_no_changes[engine-@prefix ex:<http://x/>. ex:S\
+        \ ex:p \"value\". ex:S ex:p \"value\".-1]'}\nassert len(cases)==13 and {c.attrib['name']\
+        \ for c in cases}==failed | controls\nfor c in cases:\n    assert c.find('error')\
+        \ is None and c.find('skipped') is None\n    f=c.findall('failure'); assert\
+        \ len(f)==int(c.attrib['name'] in failed)\n    if f: assert 'AssertionError'\
+        \ in (f[0].text or '')\n(p/'baseline-classifier.json').write_text(json.dumps({'failed':sorted(failed),'controls':sorted(controls),'errors':0,'skips':0},indent=2)+'\\\
+        n')\nCLASSIFIER\n"
+    - name: Restore exact application source
+      if: always()
+      shell: bash
+      run: "set -euo pipefail\nfor module in engine kgcl; do git show \"$APP_SHA:python/src/open_ontologies_lite/$module.py\"\
+        \ > \"python/src/open_ontologies_lite/$module.py\"; done\npython - <<'CACHE'\n\
+        import pathlib, shutil\nfor cache in pathlib.Path('python/src/open_ontologies_lite').rglob('__pycache__'):\n\
+        \    shutil.rmtree(cache)\nCACHE\nsha256sum --check \"$EVIDENCE_DIR/application.sha256\"\
+        \ngit diff --exit-code\n"
+    - name: Fixed public diff and entire Python suite
+      shell: bash
+      run: 'set -euo pipefail
+
+        python -m pytest -v -rs python/tests/test_identical_diff.py python/tests/test_engine.py
+        python/tests/test_kgcl.py 2>&1 | tee "$EVIDENCE_DIR/fixed.log"
+
+        python -m pytest -v -rs python/tests 2>&1 | tee "$EVIDENCE_DIR/python-core.log"
+
+        '
+    - name: Build and consume package wheel
+      shell: bash
+      run: "set -euo pipefail\npython -m build --wheel --outdir \"$EVIDENCE_DIR/dist\"\
+        \ python 2>&1 | tee \"$EVIDENCE_DIR/wheel-build.log\"\npython -m pip install\
+        \ --force-reinstall --no-deps \"$EVIDENCE_DIR\"/dist/*.whl\npython -I - <<'WHEEL'\
+        \ 2>&1 | tee \"$EVIDENCE_DIR/wheel-smoke.log\"\nimport hashlib,json,os,pathlib,zipfile\n\
+        from open_ontologies_lite import OntologyEngine,kgcl_diff\nimport open_ontologies_lite.engine\
+        \ as engine\nimport open_ontologies_lite.kgcl as kgcl\nwheel=next(pathlib.Path(os.environ['EVIDENCE_DIR'],'dist').glob('*.whl'))\n\
+        records=[]\nwith zipfile.ZipFile(wheel) as archive:\n    for module in (engine,kgcl):\n\
+        \        path=pathlib.Path(module.__file__); assert '/site-packages/' in str(path)\n\
+        \        expected=archive.read('open_ontologies_lite/'+path.name);assert path.read_bytes()==expected\n\
+        \        records.append({'module':str(path),'sha256':hashlib.sha256(expected).hexdigest()})\n\
+        pathlib.Path(os.environ['EVIDENCE_DIR'],'wheel-module-identity.json').write_text(json.dumps(records,indent=2)+'\\\
+        n')\nfor data,count in [('@prefix ex:<http://x/>. ex:S ex:p [ex:q \"value\"\
+        ].',2),('@prefix ex:<http://x/>. ex:S ex:p (\"a\" \"b\").',5)]:\n    result=OntologyEngine.diff(data,data);\
+        \ assert result['unchanged_count']==count and result['added_count']==result['removed_count']==0\n\
+        \    assert kgcl_diff(data,data).changes==[]\nfor diff in (OntologyEngine.diff,kgcl_diff):\n\
+        \    try: diff('not turtle','not turtle')\n    except SyntaxError: pass\n\
+        \    else: raise AssertionError('Identical invalid RDF must still be parsed')\n\
+        print('Installed wheel anonymous-node/list self-diff and syntax-validation\
+        \ controls passed')\nWHEEL\n"
+    - name: Final source identity
+      shell: bash
+      run: 'set -euo pipefail
+
+        sha256sum --check "$EVIDENCE_DIR/application.sha256"
+
+        git diff --exit-code
+
+        '
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: identical-rdf-diff-validation
+        retention-days: 3
+        path: ${{ runner.temp }}/identical-rdf-diff-evidence/
+'on':
+  push:
+    branches:
+    - validation/identical-rdf-diff-20261010
