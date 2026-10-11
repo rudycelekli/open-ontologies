@@ -1,0 +1,150 @@
+name: Query triple-term candidate validation
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      APP_SHA: 5b089053eafc3b6c07e5c0e5c2aff8ab1aec6d67
+      BASE_SHA: ce9415e9651117b7335d3b32d73d38b4eb1e3219
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: 5b089053eafc3b6c07e5c0e5c2aff8ab1aec6d67
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Verify source and validation tree identity
+      shell: bash
+      run: 'set -euo pipefail
+
+        export EVIDENCE_DIR="$RUNNER_TEMP/query-triple-terms-evidence"
+
+        echo "EVIDENCE_DIR=$EVIDENCE_DIR" >> "$GITHUB_ENV"
+
+        mkdir -p "$EVIDENCE_DIR"
+
+        test "$(git rev-parse HEAD)" = "$APP_SHA"
+
+        test "$(git rev-parse ''${{ github.sha }}^'')" = "$APP_SHA"
+
+        test "$(git diff --name-only "$APP_SHA" ''${{ github.sha }}'')" = ''.github/workflows/query-triple-terms-validation.yml''
+
+        git diff "$APP_SHA" ''${{ github.sha }}'' -- . '':!.github/workflows/query-triple-terms-validation.yml''
+        > "$EVIDENCE_DIR/validation-tree.diff"
+
+        test ! -s "$EVIDENCE_DIR/validation-tree.diff"
+
+        sha256sum python/src/open_ontologies_lite/engine.py python/tests/test_query_triple_terms.py
+        Cargo.lock > "$EVIDENCE_DIR/application.sha256"
+
+        '
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Verify exact native-input equivalence to completed lane
+      shell: bash
+      run: "set -euo pipefail\npython - <<'PYCODE'\nimport subprocess, pathlib, os,\
+        \ hashlib, json\nprior = '00042ff6210facd9f57368ab4a2da043c95ddef9'\napp =\
+        \ os.environ['APP_SHA']\ndef inputs(ref):\n    records = subprocess.check_output(['git',\
+        \ 'ls-tree', '-rz', ref]).split(b'\\0')\n    return [record for record in\
+        \ records if record and not record.split(b'\\t',1)[1].startswith(b'python/')\
+        \ and record.split(b'\\t',1)[1] != b'CHANGELOG.md']\na, b = inputs(prior),\
+        \ inputs(app)\nassert a == b, 'Non-Python tree differs from prior completed\
+        \ native validation'\np = pathlib.Path(os.environ['EVIDENCE_DIR'])\n(p / 'native-input-identity.json').write_text(json.dumps({'application':\
+        \ app, 'prior_validated_application': prior, 'prior_run': 'https://github.com/rudycelekli/open-ontologies/actions/runs/38097956427',\
+        \ 'non_python_records': len(a), 'manifest_sha256': hashlib.sha256(b'\\0'.join(a)).hexdigest(),\
+        \ 'equal': True, 'claim': 'Reuse prior native gate evidence for identical\
+        \ non-Python inputs; no native Rust job ran on this application commit.'},\
+        \ indent=2)+'\\n')\nPYCODE\n"
+    - name: Install actual Python package and dev tools
+      shell: bash
+      run: 'set -euo pipefail
+
+        python -m pip install --only-binary=pyoxigraph -e ''python[dev,shacl,align]''
+        hnswlib==0.8.0 numpy==2.5.4 pyshacl==0.40.1 rdflib==7.6.0 pyoxigraph==0.5.11
+        pytest==9.1.1 build==1.6.1
+
+        python --version
+
+        python -m pip freeze > "$EVIDENCE_DIR/python-versions.log"
+
+        '
+    - name: Original query regressions and controls
+      shell: bash
+      run: "set -euo pipefail\npython - <<'CACHE'\nimport pathlib, shutil\nfor cache\
+        \ in pathlib.Path('python/src/open_ontologies_lite').rglob('__pycache__'):\n\
+        \    shutil.rmtree(cache)\nCACHE\nfor module in engine; do git show \"$BASE_SHA:python/src/open_ontologies_lite/$module.py\"\
+        \ > \"python/src/open_ontologies_lite/$module.py\"; done\nset +e\npython -m\
+        \ pytest -v python/tests/test_query_triple_terms.py --junitxml=\"$EVIDENCE_DIR/baseline.xml\"\
+        \ > \"$EVIDENCE_DIR/baseline.log\" 2>&1\ncode=$?\nset -e\ncat \"$EVIDENCE_DIR/baseline.log\"\
+        \ntest \"$code\" = 1\npython - <<'CLASSIFIER'\nimport json, os, pathlib, xml.etree.ElementTree\
+        \ as ET\np=pathlib.Path(os.environ['EVIDENCE_DIR'])\ncases=list(ET.parse(p/'baseline.xml').iter('testcase'))\n\
+        failed={'test_query_rdf_triple_term[select]', 'test_query_rdf_triple_term[describe]',\
+        \ 'test_query_rdf_triple_term[construct]'}\ncontrols={'test_ordinary_literal_query_control[describe]',\
+        \ 'test_ordinary_literal_query_control[select]', 'test_ordinary_literal_query_control[construct]',\
+        \ 'test_ask_control', 'test_scalar_lexical_value_control[<http://x/o>-http://x/o]',\
+        \ 'test_unbound_select_control', 'test_scalar_lexical_value_control[\"bonjour\"\
+        @fr-bonjour]', 'test_scalar_lexical_value_control[\"7\"^^<http://www.w3.org/2001/XMLSchema#integer>-7]'}\n\
+        assert len(cases)==11 and {c.attrib[\"name\"] for c in cases}==failed | controls\n\
+        for c in cases:\n    assert c.find('error') is None and c.find('skipped')\
+        \ is None\n    f=c.findall('failure'); assert len(f)==int(c.attrib['name']\
+        \ in failed)\n    if f: assert 'AttributeError' in (f[0].text or '')\n(p/'baseline-classifier.json').write_text(json.dumps({'failed':sorted(failed),'controls':sorted(controls),'errors':0,'skips':0},indent=2)+'\\\
+        n')\nCLASSIFIER\n"
+    - name: Restore exact application source
+      if: always()
+      shell: bash
+      run: "set -euo pipefail\nfor module in engine; do git show \"$APP_SHA:python/src/open_ontologies_lite/$module.py\"\
+        \ > \"python/src/open_ontologies_lite/$module.py\"; done\npython - <<'CACHE'\n\
+        import pathlib, shutil\nfor cache in pathlib.Path('python/src/open_ontologies_lite').rglob('__pycache__'):\n\
+        \    shutil.rmtree(cache)\nCACHE\nsha256sum --check \"$EVIDENCE_DIR/application.sha256\"\
+        \ngit diff --exit-code\n"
+    - name: Fixed query and entire Python suite
+      shell: bash
+      run: 'set -euo pipefail
+
+        python -m pytest -v -rs python/tests/test_query_triple_terms.py python/tests/test_engine.py
+        2>&1 | tee "$EVIDENCE_DIR/fixed.log"
+
+        python -m pytest -v -rs python/tests 2>&1 | tee "$EVIDENCE_DIR/python-core.log"
+
+        '
+    - name: Build and consume package wheel
+      shell: bash
+      run: "set -euo pipefail\npython -m build --wheel --outdir \"$EVIDENCE_DIR/dist\"\
+        \ python 2>&1 | tee \"$EVIDENCE_DIR/wheel-build.log\"\npython -m pip install\
+        \ --force-reinstall --no-deps \"$EVIDENCE_DIR\"/dist/*.whl\npython -I - <<'WHEEL'\
+        \ 2>&1 | tee \"$EVIDENCE_DIR/wheel-smoke.log\"\nimport hashlib,json,os,pathlib,zipfile\n\
+        from open_ontologies_lite import OntologyEngine\nimport open_ontologies_lite.engine\
+        \ as module\nwheel=next(pathlib.Path(os.environ['EVIDENCE_DIR'],'dist').glob('*.whl'));path=pathlib.Path(module.__file__);assert\
+        \ '/site-packages/' in str(path)\nwith zipfile.ZipFile(wheel) as archive:expected=archive.read('open_ontologies_lite/engine.py')\n\
+        assert path.read_bytes()==expected\npathlib.Path(os.environ['EVIDENCE_DIR'],'wheel-module-identity.json').write_text(json.dumps({'module':str(path),'sha256':hashlib.sha256(expected).hexdigest(),'matches_wheel':True},indent=2)+'\\\
+        n')\ne=OntologyEngine();assert e.load('<http://x/a> <http://x/b> <<( <http://x/s>\
+        \ <http://x/p> <http://x/o> )>> .')==1\nterm=str(next(iter(e.store)).object)\n\
+        assert e.query('SELECT ?o WHERE {?s ?p ?o}')['rows']==[{'o':term}]\nfor query\
+        \ in ['CONSTRUCT {?s ?p ?o} WHERE {?s ?p ?o}','DESCRIBE <http://x/a>']:\n\
+        \    assert e.query(query)['triples']==[{'subject':'http://x/a','predicate':'http://x/b','object':term}]\n\
+        e.clear();e.load('<http://x/a> <http://x/b> \"7\"^^<http://www.w3.org/2001/XMLSchema#integer>.')\n\
+        assert e.query('SELECT ?o ?unbound WHERE {?s ?p ?o}')['rows']==[{'o':'7','unbound':None}]\n\
+        print('Installed wheel actual SELECT/CONSTRUCT/DESCRIBE triple terms and unchanged\
+        \ scalar/unbound controls passed')\nWHEEL\n"
+    - name: Final source identity
+      shell: bash
+      run: 'set -euo pipefail
+
+        sha256sum --check "$EVIDENCE_DIR/application.sha256"
+
+        git diff --exit-code
+
+        '
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: query-triple-terms-validation
+        retention-days: 3
+        path: ${{ runner.temp }}/query-triple-terms-evidence/
+'on':
+  push:
+    branches:
+    - validation/query-triple-term-results-20261010
