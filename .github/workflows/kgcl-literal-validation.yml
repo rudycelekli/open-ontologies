@@ -1,0 +1,180 @@
+name: KGCL literal candidate validation
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      APP_SHA: b9274a11e0ce44a152f3884b03bfb15390552791
+      BASE_SHA: ce9415e9651117b7335d3b32d73d38b4eb1e3219
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: b9274a11e0ce44a152f3884b03bfb15390552791
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Verify source and validation tree identity
+      shell: bash
+      run: 'set -euo pipefail
+
+        export EVIDENCE_DIR="$RUNNER_TEMP/kgcl-literal-evidence"
+
+        echo "EVIDENCE_DIR=$EVIDENCE_DIR" >> "$GITHUB_ENV"
+
+        mkdir -p "$EVIDENCE_DIR"
+
+        test "$(git rev-parse HEAD)" = "$APP_SHA"
+
+        test "$(git rev-parse ''${{ github.sha }}^'')" = "$APP_SHA"
+
+        test "$(git diff --name-only "$APP_SHA" ''${{ github.sha }}'')" = ''.github/workflows/kgcl-literal-validation.yml''
+
+        git diff "$APP_SHA" ''${{ github.sha }}'' -- . '':!.github/workflows/kgcl-literal-validation.yml''
+        > "$EVIDENCE_DIR/validation-tree.diff"
+
+        test ! -s "$EVIDENCE_DIR/validation-tree.diff"
+
+        sha256sum python/src/open_ontologies_lite/kgcl.py python/tests/test_kgcl_literal_datatype.py
+        Cargo.lock > "$EVIDENCE_DIR/application.sha256"
+
+        '
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Verify exact native-input equivalence to completed lane
+      shell: bash
+      run: "set -euo pipefail\npython - <<'PYCODE'\nimport subprocess, pathlib, os,\
+        \ hashlib, json\nprior = '00042ff6210facd9f57368ab4a2da043c95ddef9'\napp =\
+        \ os.environ['APP_SHA']\ndef inputs(ref):\n    records = subprocess.check_output(['git',\
+        \ 'ls-tree', '-rz', ref]).split(b'\\0')\n    return [record for record in\
+        \ records if record and not record.split(b'\\t',1)[1].startswith(b'python/')\
+        \ and record.split(b'\\t',1)[1] != b'CHANGELOG.md']\na, b = inputs(prior),\
+        \ inputs(app)\nassert a == b, 'Non-Python tree differs from prior completed\
+        \ native validation'\np = pathlib.Path(os.environ['EVIDENCE_DIR'])\n(p / 'native-input-identity.json').write_text(json.dumps({'application':\
+        \ app, 'prior_validated_application': prior, 'prior_run': 'https://github.com/rudycelekli/open-ontologies/actions/runs/38097956427',\
+        \ 'non_python_records': len(a), 'manifest_sha256': hashlib.sha256(b'\\0'.join(a)).hexdigest(),\
+        \ 'equal': True, 'claim': 'Reuse prior native gate evidence for identical\
+        \ non-Python inputs; no native Rust job ran on this application commit.'},\
+        \ indent=2)+'\\n')\nPYCODE\n"
+    - name: Install actual Python package and dev tools
+      shell: bash
+      run: 'set -euo pipefail
+
+        python -m pip install --only-binary=pyoxigraph -e ''python[dev]'' pyoxigraph==0.5.11
+        pytest==9.1.1 build==1.6.1
+
+        python --version
+
+        python -m pip freeze > "$EVIDENCE_DIR/python-versions.log"
+
+        '
+    - name: Original KGCL datatype and escaped-label regressions
+      shell: bash
+      run: "set -euo pipefail\ntrap 'git show \"$APP_SHA:python/src/open_ontologies_lite/kgcl.py\"\
+        \ > python/src/open_ontologies_lite/kgcl.py' EXIT\ngit show \"$BASE_SHA:python/src/open_ontologies_lite/kgcl.py\"\
+        \ > python/src/open_ontologies_lite/kgcl.py\nset +e\npython -m pytest -v python/tests/test_kgcl_literal_datatype.py\
+        \ -k 'test_kgcl_diff_detects_literal_datatype_change or test_kgcl_unchanged_literal_is_empty'\
+        \ --junitxml=\"$EVIDENCE_DIR/baseline.xml\" > \"$EVIDENCE_DIR/baseline.log\"\
+        \ 2>&1\ncode=$?\npython -m pytest -v python/tests/test_kgcl_literal_datatype.py\
+        \ -k test_escaped_label_lexical_value_is_not_parsed_from_display_text --junitxml=\"\
+        $EVIDENCE_DIR/escaped-baseline.xml\" > \"$EVIDENCE_DIR/escaped-baseline.log\"\
+        \ 2>&1\nescaped_code=$?\nset -e\ncat \"$EVIDENCE_DIR/baseline.log\" \"$EVIDENCE_DIR/escaped-baseline.log\"\
+        \ntest \"$code\" = 1 -a \"$escaped_code\" = 1\npython - <<'PYCODE'\nimport\
+        \ json, os, pathlib, xml.etree.ElementTree as ET\np = pathlib.Path(os.environ['EVIDENCE_DIR'])\n\
+        cases = list(ET.parse(p / 'baseline.xml').iter('testcase'))\nfailed = {f'test_kgcl_diff_detects_literal_datatype_change[{kind}]'\
+        \ for kind in ['string-to-integer', 'integer-to-decimal', 'integer-to-double']}\n\
+        controls = {f'test_kgcl_unchanged_literal_is_empty[{kind}]' for kind in ['string',\
+        \ 'integer', 'decimal', 'double', 'language']}\nassert len(cases) == 8 and\
+        \ {c.attrib['name'] for c in cases} == failed | controls\nfor case in cases:\n\
+        \    assert case.find('error') is None and case.find('skipped') is None\n\
+        \    failures = case.findall('failure')\n    assert len(failures) == int(case.attrib['name']\
+        \ in failed)\n    if failures: assert 'AssertionError' in (failures[0].text\
+        \ or ''), failures[0].text\nescaped = list(ET.parse(p / 'escaped-baseline.xml').iter('testcase'))\n\
+        assert len(escaped) == 1 and escaped[0].attrib['name'] == 'test_escaped_label_lexical_value_is_not_parsed_from_display_text'\n\
+        assert escaped[0].find('error') is None and escaped[0].find('skipped') is\
+        \ None\nassert len(escaped[0].findall('failure')) == 1 and 'AssertionError'\
+        \ in (escaped[0].find('failure').text or '')\n(p / 'baseline-classifier.json').write_text(json.dumps({'datatype_failed':\
+        \ sorted(failed), 'unchanged_passed': sorted(controls), 'errors': 0, 'skips':\
+        \ 0, 'failure': 'AssertionError', 'additional_escaped_label_regression': 'one\
+        \ expected AssertionError; separate baseline report'}, indent=2)+'\\n')\n\
+        PYCODE\n"
+    - name: Restore exact application source
+      if: always()
+      shell: bash
+      run: 'set -euo pipefail
+
+        git show "$APP_SHA:python/src/open_ontologies_lite/kgcl.py" > python/src/open_ontologies_lite/kgcl.py
+
+        sha256sum --check "$EVIDENCE_DIR/application.sha256"
+
+        git diff --exit-code
+
+        '
+    - name: Fixed KGCL and entire Python core suite
+      shell: bash
+      run: 'set -euo pipefail
+
+        python -m pytest -v -rs python/tests/test_kgcl.py python/tests/test_kgcl_literal_datatype.py
+        2>&1 | tee "$EVIDENCE_DIR/fixed.log"
+
+        python -m pytest -v -rs python/tests --ignore=python/tests/test_align.py --ignore=python/tests/test_shacl.py
+        --ignore=python/tests/test_shacl_vacuous.py 2>&1 | tee "$EVIDENCE_DIR/python-core.log"
+
+        '
+    - name: Build and consume package wheel
+      shell: bash
+      run: 'set -euo pipefail
+
+        python -m build --wheel --outdir "$EVIDENCE_DIR/dist" python 2>&1 | tee "$EVIDENCE_DIR/wheel-build.log"
+
+        python -m pip install --force-reinstall --no-deps "$EVIDENCE_DIR"/dist/*.whl
+
+        python -I - <<''PYCODE'' 2>&1 | tee "$EVIDENCE_DIR/wheel-smoke.log"
+
+        import open_ontologies_lite
+
+        from open_ontologies_lite import kgcl_diff
+
+        assert ''/site-packages/'' in open_ontologies_lite.__file__, open_ontologies_lite.__file__
+
+        old = ''<http://x/Thing> <http://x/value> "7" .''
+
+        new = ''<http://x/Thing> <http://x/value> "7"^^<http://www.w3.org/2001/XMLSchema#integer>
+        .''
+
+        result = kgcl_diff(old, new, fmt=''ntriples'')
+
+        assert result.counts() == {''edge_creation'': 1, ''edge_deletion'': 1}, result.changes
+
+        assert len({change[''object''] for change in result.changes}) == 2
+
+        assert kgcl_diff(old, old, fmt=''ntriples'').changes == []
+
+        assert kgcl_diff(new, new, fmt=''ntriples'').changes == []
+
+        print(''Installed wheel actual KGCL datatype comparison and unchanged controls
+        passed'')
+
+        PYCODE
+
+        '
+    - name: Final source identity
+      shell: bash
+      run: 'set -euo pipefail
+
+        sha256sum --check "$EVIDENCE_DIR/application.sha256"
+
+        git diff --exit-code
+
+        '
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: kgcl-literal-validation
+        retention-days: 3
+        path: ${{ runner.temp }}/kgcl-literal-evidence/
+'on':
+  push:
+    branches:
+    - validation/kgcl-literal-20261010
