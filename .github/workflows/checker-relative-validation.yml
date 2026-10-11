@@ -1,0 +1,147 @@
+name: Relative checker candidate validation
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      APP_SHA: 8d262d7a16e60bd0ce9ac2abe98fa0d7996e1770
+      BASE_SHA: ce9415e9651117b7335d3b32d73d38b4eb1e3219
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: 8d262d7a16e60bd0ce9ac2abe98fa0d7996e1770
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Verify source and validation tree identity
+      shell: bash
+      run: 'set -euo pipefail
+
+        export EVIDENCE_DIR="$RUNNER_TEMP/checker-relative-evidence"
+
+        echo "EVIDENCE_DIR=$EVIDENCE_DIR" >> "$GITHUB_ENV"
+
+        mkdir -p "$EVIDENCE_DIR"
+
+        test "$(git rev-parse HEAD)" = "$APP_SHA"
+
+        test "$(git rev-parse ''${{ github.sha }}^'')" = "$APP_SHA"
+
+        test "$(git diff --name-only "$APP_SHA" ''${{ github.sha }}'')" = ''.github/workflows/checker-relative-validation.yml''
+
+        git diff "$APP_SHA" ''${{ github.sha }}'' -- . '':!.github/workflows/checker-relative-validation.yml''
+        > "$EVIDENCE_DIR/validation-tree.diff"
+
+        test ! -s "$EVIDENCE_DIR/validation-tree.diff"
+
+        sha256sum python/src/open_ontologies_lite/horn/certify.py python/tests/test_horn_checker_relative.py
+        Cargo.lock > "$EVIDENCE_DIR/application.sha256"
+
+        '
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Verify exact native-input equivalence to completed lane
+      shell: bash
+      run: "set -euo pipefail\npython - <<'PYCODE'\nimport subprocess, pathlib, os,\
+        \ hashlib, json\nprior = '00042ff6210facd9f57368ab4a2da043c95ddef9'\napp =\
+        \ os.environ['APP_SHA']\ndef inputs(ref):\n    records = subprocess.check_output(['git',\
+        \ 'ls-tree', '-rz', ref]).split(b'\\0')\n    return [record for record in\
+        \ records if record and not record.split(b'\\t',1)[1].startswith(b'python/')\
+        \ and record.split(b'\\t',1)[1] != b'CHANGELOG.md']\na, b = inputs(prior),\
+        \ inputs(app)\nassert a == b, 'Non-Python tree differs from prior completed\
+        \ native validation'\np = pathlib.Path(os.environ['EVIDENCE_DIR'])\n(p / 'native-input-identity.json').write_text(json.dumps({'application':\
+        \ app, 'prior_validated_application': prior, 'prior_run': 'https://github.com/rudycelekli/open-ontologies/actions/runs/38097956427',\
+        \ 'non_python_records': len(a), 'manifest_sha256': hashlib.sha256(b'\\0'.join(a)).hexdigest(),\
+        \ 'equal': True, 'claim': 'Reuse prior native gate evidence for identical\
+        \ non-Python inputs; no native Rust job ran on this application commit.'},\
+        \ indent=2)+'\\n')\nPYCODE\n"
+    - name: Install actual Python package and dev tools
+      shell: bash
+      run: 'set -euo pipefail
+
+        python -m pip install --only-binary=pyoxigraph -e ''python[dev]'' pyoxigraph==0.5.11
+        pytest==9.1.1 build==1.6.1
+
+        python --version
+
+        python -m pip freeze > "$EVIDENCE_DIR/python-versions.log"
+
+        '
+    - name: Original relative executable regressions and controls
+      shell: bash
+      run: "set -euo pipefail\ntrap 'git show \"$APP_SHA:python/src/open_ontologies_lite/horn/certify.py\"\
+        \ > python/src/open_ontologies_lite/horn/certify.py' EXIT\ngit show \"$BASE_SHA:python/src/open_ontologies_lite/horn/certify.py\"\
+        \ > python/src/open_ontologies_lite/horn/certify.py\nset +e\npython -m pytest\
+        \ -v python/tests/test_horn_checker_relative.py --junitxml=\"$EVIDENCE_DIR/baseline.xml\"\
+        \ > \"$EVIDENCE_DIR/baseline.log\" 2>&1\ncode=$?\nset -e\ncat \"$EVIDENCE_DIR/baseline.log\"\
+        \ntest \"$code\" = 1\npython - <<'PYCODE'\nimport json, os, pathlib, xml.etree.ElementTree\
+        \ as ET\np = pathlib.Path(os.environ['EVIDENCE_DIR'])\ncases = list(ET.parse(p/'baseline.xml').iter('testcase'))\n\
+        controls = {'test_located_checker_executes_from_selected_location[absolute]',\
+        \ 'test_located_checker_executes_from_selected_location[path]'}\nfailed =\
+        \ {'test_located_checker_executes_from_selected_location[explicit]', 'test_located_checker_executes_from_selected_location[environment]'}\n\
+        assert len(cases)==4 and {c.attrib['name'] for c in cases} == failed | controls\n\
+        for c in cases:\n    assert c.find('error') is None and c.find('skipped')\
+        \ is None\n    f=c.findall('failure'); assert len(f)==int(c.attrib['name']\
+        \ in failed)\n    if f: assert 'AssertionError' in (f[0].text or '')\n(p/'baseline-classifier.json').write_text(json.dumps({'failed':sorted(failed),'controls':sorted(controls),'errors':0,'skips':0,'failure':'AssertionError'},indent=2)+'\\\
+        n')\nPYCODE\n"
+    - name: Restore exact application source
+      if: always()
+      shell: bash
+      run: 'set -euo pipefail
+
+        git show "$APP_SHA:python/src/open_ontologies_lite/horn/certify.py" > python/src/open_ontologies_lite/horn/certify.py
+
+        sha256sum --check "$EVIDENCE_DIR/application.sha256"
+
+        git diff --exit-code
+
+        '
+    - name: Fixed transport and entire Python core suite
+      shell: bash
+      run: 'set -euo pipefail
+
+        python -m pytest -v -rs python/tests/test_horn_unchecked_never_reports_checked.py
+        python/tests/test_horn_checker_relative.py 2>&1 | tee "$EVIDENCE_DIR/fixed.log"
+
+        python -m pytest -v -rs python/tests --ignore=python/tests/test_align.py --ignore=python/tests/test_shacl.py
+        --ignore=python/tests/test_shacl_vacuous.py 2>&1 | tee "$EVIDENCE_DIR/python-core.log"
+
+        '
+    - name: Build and consume package wheel
+      shell: bash
+      run: "set -euo pipefail\npython -m build --wheel --outdir \"$EVIDENCE_DIR/dist\"\
+        \ python 2>&1 | tee \"$EVIDENCE_DIR/wheel-build.log\"\npython -m pip install\
+        \ --force-reinstall --no-deps \"$EVIDENCE_DIR\"/dist/*.whl\npython -I - <<'PYCODE'\
+        \ 2>&1 | tee \"$EVIDENCE_DIR/wheel-smoke.log\"\nimport open_ontologies_lite,\
+        \ pathlib, tempfile, os, sys\nfrom open_ontologies_lite.horn.certify import\
+        \ check_horn\nassert '/site-packages/' in open_ontologies_lite.__file__\n\
+        with tempfile.TemporaryDirectory() as directory:\n    p=pathlib.Path(directory);\
+        \ (p/'owned-python').symlink_to(sys.executable)\n    (p/'check').write_text('import\
+        \ json,sys; print(json.dumps({\"ok\":False})); sys.exit(1)')\n    os.chdir(p);\
+        \ os.environ['PATH']=str(p/'unrelated-bin')\n    for source in ['explicit',\
+        \ 'environment']:\n        if source=='environment': os.environ['OO_HORN']='./owned-python'\n\
+        \        report=check_horn('certificate',checker='./owned-python' if source=='explicit'\
+        \ else None)\n        assert report['status']=='rejected' and report['checked']\
+        \ is True and report['verdict'] is None, report\nprint('Installed wheel actual\
+        \ relative executable transport controls passed; no Lean proof')\nPYCODE\n"
+    - name: Final source identity
+      shell: bash
+      run: 'set -euo pipefail
+
+        sha256sum --check "$EVIDENCE_DIR/application.sha256"
+
+        git diff --exit-code
+
+        '
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: checker-relative-validation
+        retention-days: 3
+        path: ${{ runner.temp }}/checker-relative-evidence/
+'on':
+  push:
+    branches:
+    - validation/checker-relative-20261010
