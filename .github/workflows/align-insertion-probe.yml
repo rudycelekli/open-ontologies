@@ -1,0 +1,92 @@
+name: Alignment insertion read-only probe
+'on':
+  push:
+    branches:
+    - validation/align-insertion-probe-20261010
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ce9415e9651117b7335d3b32d73d38b4eb1e3219
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Exact original source identity
+      shell: bash
+      run: 'set -euo pipefail
+
+        export EVIDENCE_DIR="$RUNNER_TEMP/align-insertion-probe"
+
+        mkdir -p "$EVIDENCE_DIR"
+
+        echo "EVIDENCE_DIR=$EVIDENCE_DIR" >> "$GITHUB_ENV"
+
+        test "$(git rev-parse HEAD)" = "ce9415e9651117b7335d3b32d73d38b4eb1e3219"
+
+        test "$(git rev-parse ''${{ github.sha }}^'')" = "ce9415e9651117b7335d3b32d73d38b4eb1e3219"
+
+        test "$(git diff --name-only HEAD ''${{ github.sha }}'')" = ''.github/workflows/align-insertion-probe.yml''
+
+        sha256sum python/src/open_ontologies_lite/align.py Cargo.lock > "$EVIDENCE_DIR/source.sha256"
+
+        '
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Install actual alignment native dependency on hosted runner
+      shell: bash
+      run: 'set -euo pipefail
+
+        python -m pip install -e "python[align,dev]" hnswlib==0.8.0 pyoxigraph==0.5.11
+        pytest==9.1.1
+
+        python -m pip freeze > "$EVIDENCE_DIR/versions.log"
+
+        '
+    - name: Actual public alignment baseline and controls
+      shell: bash
+      run: "set -euo pipefail\npython - <<'PYCODE'\nimport os,pathlib\np=pathlib.Path(os.environ['EVIDENCE_DIR'])\n\
+        (p/'test_align_failed_insertion.py').write_text('import pytest\\nfrom open_ontologies_lite.align\
+        \ import AlignmentIndex\\n\\ndef state(index):\\n    result = {\"length\"\
+        : len(index), \"native_count\": index._index.get_current_count()}\\n    try:\\\
+        n        result[\"ids\"] = sorted(candidate.id for candidate in index.query([1.,\
+        \ 0.], k=10))\\n    except RuntimeError as exc:\\n        result[\"query_error\"\
+        ] = type(exc).__name__\\n    return result\\n\\n@pytest.mark.parametrize(\"\
+        failure\", [\"capacity\", \"numeric\"])\\ndef test_failed_native_insertion_keeps_existing_index_usable(failure):\\\
+        n    index = AlignmentIndex(2, max_elements=1 if failure == \"capacity\" else\
+        \ 3)\\n    index.add(\"first\", [1., 0.])\\n    with pytest.raises(RuntimeError\
+        \ if failure == \"capacity\" else ValueError):\\n        index.add(\"rejected\"\
+        , [0., 1.] if failure == \"capacity\" else [\"not-a-number\", 0.])\\n    assert\
+        \ state(index) == {\"length\": 1, \"native_count\": 1, \"ids\": [\"first\"\
+        ]}\\n\\ndef test_valid_insertion_after_rejection_has_no_ghost_label():\\n\
+        \    index = AlignmentIndex(2, max_elements=3)\\n    index.add(\"first\",\
+        \ [1., 0.])\\n    with pytest.raises(ValueError):\\n        index.add(\"rejected\"\
+        , [\"not-a-number\", 0.])\\n    label = index.add(\"second\", [0., 1.])\\\
+        n    assert {\"label\": label, **state(index)} == {\"label\": 1, \"length\"\
+        : 2, \"native_count\": 2, \"ids\": [\"first\", \"second\"]}\\n\\ndef test_normal_add_and_query_control():\\\
+        n    index = AlignmentIndex(2, max_elements=2)\\n    assert index.add(\"first\"\
+        , [1., 0.]) == 0\\n    assert state(index) == {\"length\": 1, \"native_count\"\
+        : 1, \"ids\": [\"first\"]}\\n\\ndef test_empty_index_control():\\n    index\
+        \ = AlignmentIndex(2)\\n    assert len(index) == 0 and index.query([1., 0.])\
+        \ == []\\n')\nPYCODE\nset +e\npython -m pytest -v \"$EVIDENCE_DIR/test_align_failed_insertion.py\"\
+        \ --junitxml=\"$EVIDENCE_DIR/baseline.xml\" > \"$EVIDENCE_DIR/baseline.log\"\
+        \ 2>&1\ncode=$?\nset -e\ncat \"$EVIDENCE_DIR/baseline.log\"\ntest \"$code\"\
+        \ = 1\npython - <<'PYCODE'\nimport os,pathlib,json,xml.etree.ElementTree as\
+        \ ET\np=pathlib.Path(os.environ['EVIDENCE_DIR']); cases=list(ET.parse(p/'baseline.xml').iter('testcase'))\n\
+        failed={'test_failed_native_insertion_keeps_existing_index_usable[capacity]','test_failed_native_insertion_keeps_existing_index_usable[numeric]','test_valid_insertion_after_rejection_has_no_ghost_label'}\n\
+        controls={'test_normal_add_and_query_control','test_empty_index_control'}\n\
+        assert len(cases)==5 and {c.attrib['name'] for c in cases}==failed|controls\n\
+        for c in cases:\n    assert c.find('error') is None and c.find('skipped')\
+        \ is None\n    f=c.findall('failure');assert len(f)==int(c.attrib['name']\
+        \ in failed)\n    if f:assert 'AssertionError' in (f[0].text or '')\n(p/'classifier.json').write_text(json.dumps({'failed':sorted(failed),'controls':sorted(controls),'errors':0,'skips':0},indent=2))\n\
+        PYCODE\nsha256sum --check \"$EVIDENCE_DIR/source.sha256\"\ngit diff --exit-code\n"
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: align-insertion-probe
+        retention-days: 3
+        path: ${{ runner.temp }}/align-insertion-probe/
