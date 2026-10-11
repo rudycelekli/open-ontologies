@@ -1,0 +1,183 @@
+name: Alignment insertion candidate validation
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      APP_SHA: baba4f076d8a9f7dc8c2544d5ae94cd977c9baad
+      BASE_SHA: ce9415e9651117b7335d3b32d73d38b4eb1e3219
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: baba4f076d8a9f7dc8c2544d5ae94cd977c9baad
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Verify source and validation tree identity
+      shell: bash
+      run: 'set -euo pipefail
+
+        export EVIDENCE_DIR="$RUNNER_TEMP/alignment-insertion-evidence"
+
+        echo "EVIDENCE_DIR=$EVIDENCE_DIR" >> "$GITHUB_ENV"
+
+        mkdir -p "$EVIDENCE_DIR"
+
+        test "$(git rev-parse HEAD)" = "$APP_SHA"
+
+        test "$(git rev-parse ''${{ github.sha }}^'')" = "$APP_SHA"
+
+        test "$(git diff --name-only "$APP_SHA" ''${{ github.sha }}'')" = ''.github/workflows/alignment-insertion-validation.yml''
+
+        git diff "$APP_SHA" ''${{ github.sha }}'' -- . '':!.github/workflows/alignment-insertion-validation.yml''
+        > "$EVIDENCE_DIR/validation-tree.diff"
+
+        test ! -s "$EVIDENCE_DIR/validation-tree.diff"
+
+        sha256sum python/src/open_ontologies_lite/align.py python/tests/test_align_failed_insertion.py
+        Cargo.lock > "$EVIDENCE_DIR/application.sha256"
+
+        '
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Verify exact native-input equivalence to completed lane
+      shell: bash
+      run: "set -euo pipefail\npython - <<'PYCODE'\nimport subprocess, pathlib, os,\
+        \ hashlib, json\nprior = '00042ff6210facd9f57368ab4a2da043c95ddef9'\napp =\
+        \ os.environ['APP_SHA']\ndef inputs(ref):\n    records = subprocess.check_output(['git',\
+        \ 'ls-tree', '-rz', ref]).split(b'\\0')\n    return [record for record in\
+        \ records if record and not record.split(b'\\t',1)[1].startswith(b'python/')\
+        \ and record.split(b'\\t',1)[1] != b'CHANGELOG.md']\na, b = inputs(prior),\
+        \ inputs(app)\nassert a == b, 'Non-Python tree differs from prior completed\
+        \ native validation'\np = pathlib.Path(os.environ['EVIDENCE_DIR'])\n(p / 'native-input-identity.json').write_text(json.dumps({'application':\
+        \ app, 'prior_validated_application': prior, 'prior_run': 'https://github.com/rudycelekli/open-ontologies/actions/runs/38097956427',\
+        \ 'non_python_records': len(a), 'manifest_sha256': hashlib.sha256(b'\\0'.join(a)).hexdigest(),\
+        \ 'equal': True, 'claim': 'Reuse prior native gate evidence for identical\
+        \ non-Python inputs; no native Rust job ran on this application commit.'},\
+        \ indent=2)+'\\n')\nPYCODE\n"
+    - name: Install actual Python package and dev tools
+      shell: bash
+      run: 'set -euo pipefail
+
+        python -m pip install --only-binary=pyoxigraph -e ''python[dev,shacl,align]''
+        hnswlib==0.8.0 numpy==2.5.4 pyshacl==0.40.1 rdflib==7.6.0 pyoxigraph==0.5.11
+        pytest==9.1.1 build==1.6.1
+
+        python --version
+
+        python -m pip freeze > "$EVIDENCE_DIR/python-versions.log"
+
+        '
+    - name: Original native insertion regressions and controls
+      shell: bash
+      run: "set -euo pipefail\npython - <<'CACHE'\nimport pathlib, shutil\nfor cache\
+        \ in pathlib.Path('python/src/open_ontologies_lite').rglob('__pycache__'):\n\
+        \    shutil.rmtree(cache)\nCACHE\ntrap 'git show \"$APP_SHA:python/src/open_ontologies_lite/align.py\"\
+        \ > python/src/open_ontologies_lite/align.py' EXIT\ngit show \"$BASE_SHA:python/src/open_ontologies_lite/align.py\"\
+        \ > python/src/open_ontologies_lite/align.py\nset +e\npython -m pytest -v\
+        \ python/tests/test_align_failed_insertion.py -k \"not test_first_rejected_insertion_keeps_empty_index_and_build_state\"\
+        \ --junitxml=\"$EVIDENCE_DIR/baseline.xml\" > \"$EVIDENCE_DIR/baseline.log\"\
+        \ 2>&1\ncode=$?\nset -e\ncat \"$EVIDENCE_DIR/baseline.log\"\ntest \"$code\"\
+        \ = 1\npython - <<'PYCODE'\nimport json, os, pathlib, xml.etree.ElementTree\
+        \ as ET\np = pathlib.Path(os.environ['EVIDENCE_DIR'])\ncases = list(ET.parse(p/'baseline.xml').iter('testcase'))\n\
+        failed = {'test_failed_native_insertion_keeps_existing_index_usable[capacity]','test_failed_native_insertion_keeps_existing_index_usable[numeric]','test_valid_insertion_after_rejection_has_no_ghost_label'}\n\
+        controls = {'test_normal_add_and_query_control','test_empty_index_control'}\n\
+        assert len(cases)==5 and {c.attrib['name'] for c in cases} == failed | controls\n\
+        for c in cases:\n    assert c.find('error') is None and c.find('skipped')\
+        \ is None\n    f=c.findall('failure'); assert len(f)==int(c.attrib['name']\
+        \ in failed)\n    if f: assert 'AssertionError' in (f[0].text or '')\n(p/'baseline-classifier.json').write_text(json.dumps({'failed':sorted(failed),'controls':sorted(controls),'errors':0,'skips':0,'failure':'AssertionError'},indent=2)+'\\\
+        n')\nPYCODE\n"
+    - name: Restore exact application source
+      if: always()
+      shell: bash
+      run: "set -euo pipefail\ngit show \"$APP_SHA:python/src/open_ontologies_lite/align.py\"\
+        \ > python/src/open_ontologies_lite/align.py\nsha256sum --check \"$EVIDENCE_DIR/application.sha256\"\
+        \ngit diff --exit-code\n\npython - <<'CACHE'\nimport pathlib, shutil\nfor\
+        \ cache in pathlib.Path('python/src/open_ontologies_lite').rglob('__pycache__'):\n\
+        \    shutil.rmtree(cache)\nCACHE\n"
+    - name: Fixed native alignment and entire Python suite
+      shell: bash
+      run: 'set -euo pipefail
+
+        python - <<''IDENTITY''
+
+        import hashlib, json, marshal, os, pathlib, types
+
+        import open_ontologies_lite.align as module
+
+        source = pathlib.Path(module.__file__)
+
+        compiled = compile(source.read_text(), str(source), ''exec'')
+
+        cls = next(c for c in compiled.co_consts if isinstance(c, types.CodeType)
+        and c.co_name == ''AlignmentIndex'')
+
+        method = next(c for c in cls.co_consts if isinstance(c, types.CodeType) and
+        c.co_name == ''add'')
+
+        loaded = module.AlignmentIndex.add.__code__
+
+        assert marshal.dumps(loaded) == marshal.dumps(method), ''Loaded method differs
+        from exact APP source compilation''
+
+        pathlib.Path(os.environ[''EVIDENCE_DIR''], ''loaded-source-identity.json'').write_text(json.dumps({''module'':
+        str(source), ''sha256'': hashlib.sha256(source.read_bytes()).hexdigest(),
+        ''loaded_method_matches_compiled_source'': True}, indent=2)+''\n'')
+
+        IDENTITY
+
+        python -m pytest -v -rs python/tests/test_align.py python/tests/test_align_failed_insertion.py
+        2>&1 | tee "$EVIDENCE_DIR/fixed.log"
+
+        python -m pytest -v -rs python/tests 2>&1 | tee "$EVIDENCE_DIR/python-core.log"
+
+        '
+    - name: Build and consume package wheel
+      shell: bash
+      run: "set -euo pipefail\npython -m build --wheel --outdir \"$EVIDENCE_DIR/dist\"\
+        \ python 2>&1 | tee \"$EVIDENCE_DIR/wheel-build.log\"\npython -m pip install\
+        \ --force-reinstall --no-deps \"$EVIDENCE_DIR\"/dist/*.whl\npython -I - <<'PYCODE'\
+        \ 2>&1 | tee \"$EVIDENCE_DIR/wheel-smoke.log\"\nimport open_ontologies_lite\n\
+        import hashlib, json, os, pathlib, zipfile\nimport open_ontologies_lite.align\
+        \ as module\nwheel = next(pathlib.Path(os.environ['EVIDENCE_DIR'], 'dist').glob('*.whl'))\n\
+        path = pathlib.Path(module.__file__)\nassert '/site-packages/' in str(path)\n\
+        with zipfile.ZipFile(wheel) as archive:\n    expected = archive.read('open_ontologies_lite/align.py')\n\
+        assert path.read_bytes() == expected\npathlib.Path(os.environ['EVIDENCE_DIR'],\
+        \ 'wheel-module-identity.json').write_text(json.dumps({'module':str(path),'wheel':wheel.name,'sha256':hashlib.sha256(expected).hexdigest(),'matches_wheel':True},indent=2)+'\\\
+        n')\nfrom open_ontologies_lite.align import AlignmentIndex\nassert '/site-packages/'\
+        \ in open_ontologies_lite.__file__\nfor failure in ['capacity','numeric']:\n\
+        \    index=AlignmentIndex(2,max_elements=1 if failure=='capacity' else 3)\n\
+        \    index.add('first',[1.,0.])\n    try: index.add('rejected',[0.,1.] if\
+        \ failure=='capacity' else ['not-a-number',0.])\n    except (RuntimeError,ValueError):\
+        \ pass\n    else: raise AssertionError('Native insertion should reject this\
+        \ fixture')\n    assert len(index)==1 and index._index.get_current_count()==1\n\
+        \    assert [c.id for c in index.query([1.,0.],k=10)]==['first']\n    if failure=='numeric':\n\
+        \        assert index.add('second',[0.,1.])==1\n        assert len(index)==2\
+        \ and {c.id for c in index.query([1.,0.],k=10)}=={'first','second'}\nempty=AlignmentIndex(2)\n\
+        try: empty.add('rejected',['not-a-number',0.])\nexcept ValueError: pass\n\
+        else: raise AssertionError('Native conversion should reject this fixture')\n\
+        assert len(empty)==0 and empty.query([1.,0.])==[] and empty._built is False\n\
+        print('Installed wheel actual HNSW capacity/numeric rejection and recovery\
+        \ controls passed')\nPYCODE\n"
+    - name: Final source identity
+      shell: bash
+      run: 'set -euo pipefail
+
+        sha256sum --check "$EVIDENCE_DIR/application.sha256"
+
+        git diff --exit-code
+
+        '
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: alignment-insertion-validation
+        retention-days: 3
+        path: ${{ runner.temp }}/alignment-insertion-evidence/
+'on':
+  push:
+    branches:
+    - validation/alignment-insertion-v3-20261010
