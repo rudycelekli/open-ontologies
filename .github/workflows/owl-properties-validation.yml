@@ -1,0 +1,146 @@
+name: Python OWL property candidate validation
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      APP_SHA: af1ce383535e3d4378300713b21a34a44e36d9f5
+      BASE_SHA: ce9415e9651117b7335d3b32d73d38b4eb1e3219
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: af1ce383535e3d4378300713b21a34a44e36d9f5
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Verify source and validation tree identity
+      shell: bash
+      run: 'set -euo pipefail
+
+        export EVIDENCE_DIR="$RUNNER_TEMP/owl-properties-evidence"
+
+        echo "EVIDENCE_DIR=$EVIDENCE_DIR" >> "$GITHUB_ENV"
+
+        mkdir -p "$EVIDENCE_DIR"
+
+        test "$(git rev-parse HEAD)" = "$APP_SHA"
+
+        test "$(git rev-parse ''${{ github.sha }}^'')" = "$APP_SHA"
+
+        test "$(git diff --name-only "$APP_SHA" ''${{ github.sha }}'')" = ''.github/workflows/owl-properties-validation.yml''
+
+        git diff "$APP_SHA" ''${{ github.sha }}'' -- . '':!.github/workflows/owl-properties-validation.yml''
+        > "$EVIDENCE_DIR/validation-tree.diff"
+
+        test ! -s "$EVIDENCE_DIR/validation-tree.diff"
+
+        sha256sum python/src/open_ontologies_lite/engine.py python/tests/test_owl_property_recognition.py
+        Cargo.lock > "$EVIDENCE_DIR/application.sha256"
+
+        '
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Verify exact native-input equivalence to completed lane
+      shell: bash
+      run: "set -euo pipefail\npython - <<'PYCODE'\nimport subprocess, pathlib, os,\
+        \ hashlib, json\nprior = '00042ff6210facd9f57368ab4a2da043c95ddef9'\napp =\
+        \ os.environ['APP_SHA']\ndef inputs(ref):\n    records = subprocess.check_output(['git',\
+        \ 'ls-tree', '-rz', ref]).split(b'\\0')\n    return [record for record in\
+        \ records if record and not record.split(b'\\t',1)[1].startswith(b'python/')\
+        \ and record.split(b'\\t',1)[1] != b'CHANGELOG.md']\na, b = inputs(prior),\
+        \ inputs(app)\nassert a == b, 'Non-Python tree differs from prior completed\
+        \ native validation'\np = pathlib.Path(os.environ['EVIDENCE_DIR'])\n(p / 'native-input-identity.json').write_text(json.dumps({'application':\
+        \ app, 'prior_validated_application': prior, 'prior_run': 'https://github.com/rudycelekli/open-ontologies/actions/runs/38097956427',\
+        \ 'non_python_records': len(a), 'manifest_sha256': hashlib.sha256(b'\\0'.join(a)).hexdigest(),\
+        \ 'equal': True, 'claim': 'Reuse prior native gate evidence for identical\
+        \ non-Python inputs; no native Rust job ran on this application commit.'},\
+        \ indent=2)+'\\n')\nPYCODE\n"
+    - name: Install actual Python package and dev tools
+      shell: bash
+      run: 'set -euo pipefail
+
+        python -m pip install --only-binary=pyoxigraph -e ''python[dev]'' pyoxigraph==0.5.11
+        pytest==9.1.1 build==1.6.1
+
+        python --version
+
+        python -m pip freeze > "$EVIDENCE_DIR/python-versions.log"
+
+        '
+    - name: Original explicit-property regressions and RDF controls
+      shell: bash
+      run: "set -euo pipefail\ntrap 'git show \"$APP_SHA:python/src/open_ontologies_lite/engine.py\"\
+        \ > python/src/open_ontologies_lite/engine.py' EXIT\ngit show \"$BASE_SHA:python/src/open_ontologies_lite/engine.py\"\
+        \ > python/src/open_ontologies_lite/engine.py\nset +e\npython -m pytest -v\
+        \ python/tests/test_owl_property_recognition.py --junitxml=\"$EVIDENCE_DIR/baseline.xml\"\
+        \ > \"$EVIDENCE_DIR/baseline.log\" 2>&1\ncode=$?\nset -e\ncat \"$EVIDENCE_DIR/baseline.log\"\
+        \ntest \"$code\" = 1\npython - <<'PYCODE'\nimport json, os, pathlib, xml.etree.ElementTree\
+        \ as ET\np = pathlib.Path(os.environ['EVIDENCE_DIR'])\ncases = list(ET.parse(p/'baseline.xml').iter('testcase'))\n\
+        controls = {'test_explicit_properties_are_schema_not_individuals[rdf:Property]',\
+        \ 'test_complete_property_has_no_hygiene_issues[rdf:Property]'}\nfailed =\
+        \ {f'{name}[{kind}]' for name in ['test_explicit_properties_are_schema_not_individuals',\
+        \ 'test_complete_property_has_no_hygiene_issues'] for kind in ['owl:ObjectProperty',\
+        \ 'owl:DatatypeProperty', 'owl:AnnotationProperty']} | {'test_multiple_property_declarations_are_counted_once',\
+        \ 'test_schema_punning_preserves_explicit_instance_type'}\nassert len(cases)==10\
+        \ and {c.attrib['name'] for c in cases} == failed | controls\nfor c in cases:\n\
+        \    assert c.find('error') is None and c.find('skipped') is None\n    f=c.findall('failure');\
+        \ assert len(f)==int(c.attrib['name'] in failed)\n    if f: assert 'AssertionError'\
+        \ in (f[0].text or '')\n(p/'baseline-classifier.json').write_text(json.dumps({'failed':sorted(failed),'controls':sorted(controls),'errors':0,'skips':0,'failure':'AssertionError'},indent=2)+'\\\
+        n')\nPYCODE\n"
+    - name: Restore exact application source
+      if: always()
+      shell: bash
+      run: 'set -euo pipefail
+
+        git show "$APP_SHA:python/src/open_ontologies_lite/engine.py" > python/src/open_ontologies_lite/engine.py
+
+        sha256sum --check "$EVIDENCE_DIR/application.sha256"
+
+        git diff --exit-code
+
+        '
+    - name: Fixed schema family and entire Python core suite
+      shell: bash
+      run: 'set -euo pipefail
+
+        python -m pytest -v -rs python/tests/test_engine.py python/tests/test_owl_property_recognition.py
+        2>&1 | tee "$EVIDENCE_DIR/fixed.log"
+
+        python -m pytest -v -rs python/tests --ignore=python/tests/test_align.py --ignore=python/tests/test_shacl.py
+        --ignore=python/tests/test_shacl_vacuous.py 2>&1 | tee "$EVIDENCE_DIR/python-core.log"
+
+        '
+    - name: Build and consume package wheel
+      shell: bash
+      run: "set -euo pipefail\npython -m build --wheel --outdir \"$EVIDENCE_DIR/dist\"\
+        \ python 2>&1 | tee \"$EVIDENCE_DIR/wheel-build.log\"\npython -m pip install\
+        \ --force-reinstall --no-deps \"$EVIDENCE_DIR\"/dist/*.whl\npython -I - <<'PYCODE'\
+        \ 2>&1 | tee \"$EVIDENCE_DIR/wheel-smoke.log\"\nimport open_ontologies_lite\n\
+        from open_ontologies_lite import OntologyEngine\nassert '/site-packages/'\
+        \ in open_ontologies_lite.__file__\nfor kind in ['ObjectProperty', 'DatatypeProperty',\
+        \ 'AnnotationProperty']:\n    e=OntologyEngine(); e.load(f'<http://x/p> a\
+        \ <http://www.w3.org/2002/07/owl#{kind}> .')\n    assert e.stats()=={'triples':1,'classes':0,'properties':1,'individuals':0}\n\
+        \    assert {i['rule'] for i in e.lint()['issues']}=={'missing-domain','missing-range'}\n\
+        print('Installed wheel actual property statistics and lint controls passed')\n\
+        PYCODE\n"
+    - name: Final source identity
+      shell: bash
+      run: 'set -euo pipefail
+
+        sha256sum --check "$EVIDENCE_DIR/application.sha256"
+
+        git diff --exit-code
+
+        '
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: owl-properties-validation
+        retention-days: 3
+        path: ${{ runner.temp }}/owl-properties-evidence/
+'on':
+  push:
+    branches:
+    - validation/python-owl-properties-20261010
