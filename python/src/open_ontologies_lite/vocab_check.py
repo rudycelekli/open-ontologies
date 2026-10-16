@@ -48,6 +48,11 @@ _CLASS_OR_PROPERTY = f"""FILTER(
  || ?k = <{OWL}AnnotationProperty>
  || ?k = <{OWL}FunctionalProperty>
  || ?k = <{OWL}InverseFunctionalProperty>
+ || ?k = <{OWL}TransitiveProperty>
+ || ?k = <{OWL}SymmetricProperty>
+ || ?k = <{OWL}AsymmetricProperty>
+ || ?k = <{OWL}ReflexiveProperty>
+ || ?k = <{OWL}IrreflexiveProperty>
  || ?k = <{RDF}Property>)"""
 
 # An ontology that gives an IRI a domain or a range has declared it in substance,

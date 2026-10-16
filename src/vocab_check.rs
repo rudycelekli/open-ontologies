@@ -95,6 +95,11 @@ const CLASS_OR_PROP_FILTER: &str = r#"FILTER(
  || ?k = <http://www.w3.org/2002/07/owl#AnnotationProperty>
  || ?k = <http://www.w3.org/2002/07/owl#FunctionalProperty>
  || ?k = <http://www.w3.org/2002/07/owl#InverseFunctionalProperty>
+ || ?k = <http://www.w3.org/2002/07/owl#TransitiveProperty>
+ || ?k = <http://www.w3.org/2002/07/owl#SymmetricProperty>
+ || ?k = <http://www.w3.org/2002/07/owl#AsymmetricProperty>
+ || ?k = <http://www.w3.org/2002/07/owl#ReflexiveProperty>
+ || ?k = <http://www.w3.org/2002/07/owl#IrreflexiveProperty>
  || ?k = <http://www.w3.org/1999/02/22-rdf-syntax-ns#Property>)"#;
 
 const DEFINED_BY_AXIOM_FILTER: &str = r#"FILTER(
