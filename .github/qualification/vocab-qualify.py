@@ -16,10 +16,24 @@ HEAD = "8b260ee746750e48a43c431acfac124d308ac788"
 TREE = "0b7283cca72800f82762f4afcd3f0460b70d51bb"
 BASE = "dfb09bf815326913d7d7822fa7228f2602fb4976"
 records = []
+(OUT / "started.json").write_text(json.dumps({"head": HEAD, "tree": TREE, "platform": os.name, "state": "qualification started; no gates passed yet"}, indent=2))
 
 
 def git(*args):
     return subprocess.check_output(["git", *args], cwd=APP)
+
+
+def tracked_blob_bytes(path, mode, windows=(os.name == "nt")):
+    if mode == b"120000" and path.is_symlink():
+        target = os.readlink(path)
+        # Windows reports a native symlink's relative target using backslashes.
+        # Git's stored target spelling uses forward slashes. Normalize only
+        # this OS representation, never regular source files or symlink text
+        # materializations, and never resolve/dereference a target.
+        if windows:
+            target = target.replace("\\", "/")
+        return os.fsencode(target)
+    return path.read_bytes()
 
 
 def freeze(label):
@@ -34,7 +48,7 @@ def freeze(label):
         path = APP / os.fsdecode(raw_path)
         if kind != b"blob":
             raise AssertionError("Unexpected non-blob tracked entry: " + str(path))
-        data = os.fsencode(os.readlink(path)) if path.is_symlink() else path.read_bytes()
+        data = tracked_blob_bytes(path, mode)
         actual = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
         assert actual == expected.decode(), (label, str(path), actual, expected.decode())
         count += 1

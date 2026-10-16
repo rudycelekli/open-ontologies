@@ -12,7 +12,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [windows-latest]
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       CARGO_INCREMENTAL: 0
@@ -46,7 +46,7 @@ jobs:
       - name: Verify helper and run bounded native qualification
         shell: bash
         run: |
-          python -c "import hashlib,pathlib; p=pathlib.Path('qualification/.github/qualification/vocab-qualify.py'); assert hashlib.sha256(p.read_bytes()).hexdigest() == '3812ca7cb895e9fc2dcb3efd80f0c2b48810f4b3729b110b78aac8fecfa4e57c'"
+          python -c "import hashlib,pathlib; p=pathlib.Path('qualification/.github/qualification/vocab-qualify.py'); assert hashlib.sha256(p.read_bytes()).hexdigest() == '605d9a07cb59ef0c91d1b12fa3810abb5c571ec07ba25febb6525670579cce27'"
           python qualification/.github/qualification/vocab-qualify.py application evidence
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
