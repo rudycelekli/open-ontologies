@@ -1,0 +1,56 @@
+name: Qualify vocabulary property characteristics
+on:
+  push:
+    branches: [validation/ontology-vocab-native-20261015]
+permissions:
+  contents: read
+jobs:
+  qualify:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      HF_HUB_OFFLINE: 1
+      TRANSFORMERS_OFFLINE: 1
+    steps:
+      - name: Preserve tracked blob bytes on disposable runner
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 8b260ee746750e48a43c431acfac124d308ac788
+          path: application
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: qualification
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: application
+          cache-on-failure: true
+      - name: Verify helper and run bounded native qualification
+        shell: bash
+        run: |
+          python -c "import hashlib,pathlib; p=pathlib.Path('qualification/.github/qualification/vocab-qualify.py'); assert hashlib.sha256(p.read_bytes()).hexdigest() == '3812ca7cb895e9fc2dcb3efd80f0c2b48810f4b3729b110b78aac8fecfa4e57c'"
+          python qualification/.github/qualification/vocab-qualify.py application evidence
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: vocabulary-native-${{ matrix.os }}
+          path: evidence/
+          if-no-files-found: error
