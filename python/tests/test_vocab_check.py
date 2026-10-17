@@ -119,3 +119,18 @@ def test_a_term_carrying_only_a_domain_axiom_counts_as_declared():
     report = vocab_check(ontology, data)
 
     assert report["conforms"] is True
+
+
+@pytest.mark.parametrize("kind", ["TransitiveProperty", "SymmetricProperty"])
+@pytest.mark.parametrize("with_class", [False, True])
+def test_characteristic_property_declares_vocabulary(kind, with_class):
+    prefix = "@prefix ex: <http://example.org/> . @prefix owl: <http://www.w3.org/2002/07/owl#> . "
+    ontology = prefix + f"ex:related a owl:{kind} ."
+    if with_class:
+        ontology += " ex:Thing a owl:Class ."
+    report = vocab_check(ontology, prefix + "ex:a ex:related ex:b .")
+    assert report["conforms"] is True, report
+    assert report["ontology_terms"] == 1 + int(with_class)
+    unknown = vocab_check(ontology, prefix + "ex:a ex:invented ex:b .")
+    assert unknown["conforms"] is False
+    assert unknown["undeclared_terms"] == ["http://example.org/invented"]
