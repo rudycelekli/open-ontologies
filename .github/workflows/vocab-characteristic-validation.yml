@@ -1,0 +1,76 @@
+name: Vocabulary characteristic validation
+on:
+  push:
+    branches: [audit/vocab-characteristics-20261017]
+permissions:
+  contents: read
+jobs:
+  qualification:
+    if: github.repository == 'rudycelekli/open-ontologies'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Select exact reviewed source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .github/scripts/vocab-characteristic-validation.sh "$RUNNER_TEMP/validate.sh"
+          git checkout --detach HEAD^
+          test "$(git rev-parse HEAD)" = 7e5239007e9561d75c85ae1a2cf3270195062528
+          test "$(git rev-parse HEAD^{tree})" = ea8e4363436be7ff2ced3223992e8d5864795b3d
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - name: Public dependency and advisory preparation
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add clippy rustfmt
+          rustup show
+          cargo --version
+          rustc --version
+          python --version
+          cargo fetch --locked
+          cargo install cargo-audit --locked
+          cargo audit --version
+          python -m pip install --no-cache-dir build hatchling pyoxigraph==0.5.11 pytest pyshacl numpy
+          HNSWLIB_NO_NATIVE=1 python -m pip install --no-cache-dir --no-binary hnswlib hnswlib==0.8.0
+          python -m pip download --only-binary=:all: --no-deps pyoxigraph==0.5.11 --dest "$RUNNER_TEMP/python-wheels"
+          python -m pip install --no-deps --no-build-isolation -e ./python
+          python -m pip freeze
+          git diff --exit-code -- Cargo.lock .cargo/audit.toml
+      - name: Credential-free actual baseline and fixed gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          audit_uid="$(id -u)"
+          audit_gid="$(id -g)"
+          audit_ip="$(command -v ip)"
+          audit_unshare="$(command -v unshare)"
+          audit_setpriv="$(command -v setpriv)"
+          sudo -n /usr/bin/env -i PATH="$PATH" HOME="$HOME" LANG=C.UTF-8 \
+            RUNNER_TEMP="$RUNNER_TEMP" CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
+            CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=2 \
+            CARGO_NET_OFFLINE=true PIP_NO_INDEX=1 \
+            AUDIT_UID="$audit_uid" AUDIT_GID="$audit_gid" AUDIT_IP="$audit_ip" AUDIT_SETPRIV="$audit_setpriv" \
+            "$audit_unshare" --net /bin/bash -ceu '
+              "$AUDIT_IP" link set lo up
+              exec "$AUDIT_SETPRIV" --reuid="$AUDIT_UID" --regid="$AUDIT_GID" --init-groups /bin/bash "$RUNNER_TEMP/validate.sh"
+            '
+      - name: Unmodified upstream security audit policy
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- .cargo/audit.toml Cargo.lock
+          cargo audit
